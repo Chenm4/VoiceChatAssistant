@@ -1,0 +1,16 @@
+{
+  "id": "2026-02-01_13-34-47-882-bw6o",
+  "title": "新对话",
+  "created_at": 1769924087,
+  "updated_at": 1769924087,
+  "system_prompt": null,
+  "messages": [],
+  "session_config": {
+    "source_name": null,
+    "models": [],
+    "temperature": 0.7,
+    "top_p": 1.0,
+    "system_prompt": null
+  },
+  "storage_path": "2026/02/2026-02-01_13-34-47-882-bw6o.json"
+}

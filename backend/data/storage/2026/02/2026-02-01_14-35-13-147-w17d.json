@@ -1,0 +1,62 @@
+{
+  "id": "2026-02-01_14-35-13-147-w17d",
+  "title": "你是",
+  "created_at": 1769927713,
+  "updated_at": 1769927720,
+  "system_prompt": null,
+  "messages": [
+    {
+      "id": "msg_8f513c5daed2",
+      "parent_id": null,
+      "role": "user",
+      "content": "你是",
+      "type": "text",
+      "created_at": 1769927715,
+      "children_ids": [
+        "msg_e0d1f52154c7"
+      ],
+      "model_info": null,
+      "usage": null,
+      "status": null,
+      "latency_ms": null,
+      "is_parallel_response": null,
+      "parallel_group_id": null,
+      "parallel_models": null
+    },
+    {
+      "id": "msg_e0d1f52154c7",
+      "parent_id": "msg_8f513c5daed2",
+      "role": "assistant",
+      "content": "我是Qwen，由阿里云开发的人工智能模型。我被设计用来生成各种类型的文本，比如文章、故事、诗歌等，并能够提供开放式问题回答、对话交流、语言翻译等多种语言相关服务。如果您有任何问题或需要帮助，欢迎随时向我提问！",
+      "type": "text",
+      "created_at": 1769927718,
+      "children_ids": [],
+      "model_info": {
+        "id": "qwen/qwen-2.5-7b-instruct",
+        "name": "qwen/qwen-2.5-7b-instruct",
+        "provider": "OpenRouter"
+      },
+      "usage": {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0
+      },
+      "status": "success",
+      "latency_ms": 3368,
+      "is_parallel_response": null,
+      "parallel_group_id": null,
+      "parallel_models": null
+    }
+  ],
+  "session_config": {
+    "source_name": "OpenRouter",
+    "models": [
+      "qwen/qwen-2.5-7b-instruct",
+      "google/gemini-2.5-flash"
+    ],
+    "temperature": 0.7,
+    "top_p": 1.0,
+    "system_prompt": null
+  },
+  "storage_path": "2026/02/2026-02-01_14-35-13-147-w17d.json"
+}

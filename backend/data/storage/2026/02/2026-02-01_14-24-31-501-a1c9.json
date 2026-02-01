@@ -1,0 +1,175 @@
+{
+  "id": "2026-02-01_14-24-31-501-a1c9",
+  "title": "测试一下。",
+  "created_at": 1769927071,
+  "updated_at": 1769927094,
+  "system_prompt": null,
+  "messages": [
+    {
+      "id": "msg_d3e39f21afbd",
+      "parent_id": null,
+      "role": "user",
+      "content": "测试一下。",
+      "type": "text",
+      "created_at": 1769927077,
+      "children_ids": [
+        "msg_624c29fc2858"
+      ],
+      "model_info": null,
+      "usage": null,
+      "status": null,
+      "latency_ms": null,
+      "is_parallel_response": null,
+      "parallel_group_id": null,
+      "parallel_models": null
+    },
+    {
+      "id": "msg_624c29fc2858",
+      "parent_id": "msg_d3e39f21afbd",
+      "role": "assistant",
+      "content": "当然可以！您有什么具体的问题或任务需要我来帮助测试吗？比如是编程、软件测试，还是其他类型的测试？请告诉我更多的细节，我会尽力协助您。",
+      "type": "text",
+      "created_at": 1769927079,
+      "children_ids": [],
+      "model_info": {
+        "id": "qwen/qwen-2.5-7b-instruct",
+        "name": "qwen/qwen-2.5-7b-instruct",
+        "provider": "OpenRouter"
+      },
+      "usage": {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0
+      },
+      "status": "success",
+      "latency_ms": 1872,
+      "is_parallel_response": null,
+      "parallel_group_id": null,
+      "parallel_models": null
+    },
+    {
+      "id": "msg_6d8629277b67",
+      "parent_id": null,
+      "role": "user",
+      "content": "效果怎么样？",
+      "type": "text",
+      "created_at": 1769927081,
+      "children_ids": [],
+      "model_info": null,
+      "usage": null,
+      "status": null,
+      "latency_ms": null,
+      "is_parallel_response": null,
+      "parallel_group_id": null,
+      "parallel_models": null
+    },
+    {
+      "id": "msg_d06c64545e31",
+      "parent_id": null,
+      "role": "user",
+      "content": "我感觉现在好像还可以。",
+      "type": "text",
+      "created_at": 1769927085,
+      "children_ids": [
+        "msg_76374d7dbfd7"
+      ],
+      "model_info": null,
+      "usage": null,
+      "status": null,
+      "latency_ms": null,
+      "is_parallel_response": null,
+      "parallel_group_id": null,
+      "parallel_models": null
+    },
+    {
+      "id": "msg_76374d7dbfd7",
+      "parent_id": "msg_d06c64545e31",
+      "role": "assistant",
+      "content": "很高兴听到您觉得目前的效果还不错！如果您有任何具体的需求或者想要测试的内容，请随时告诉我。我可以帮助您进行各种测试，包括但不限于：\n\n1. **编程相关测试**：如代码调试、性能优化等。\n2. **软件测试**：功能测试、性能测试、兼容性测试等。\n3. **语言理解和生成**：回答问题、生成文本等。\n\n请详细说明您想测试的具体内容或需求，我会尽力提供帮助。",
+      "type": "text",
+      "created_at": 1769927088,
+      "children_ids": [],
+      "model_info": {
+        "id": "qwen/qwen-2.5-7b-instruct",
+        "name": "qwen/qwen-2.5-7b-instruct",
+        "provider": "OpenRouter"
+      },
+      "usage": {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0
+      },
+      "status": "success",
+      "latency_ms": 2154,
+      "is_parallel_response": null,
+      "parallel_group_id": null,
+      "parallel_models": null
+    },
+    {
+      "id": "msg_58427fc9258c",
+      "parent_id": null,
+      "role": "user",
+      "content": "你们是什么模型？",
+      "type": "text",
+      "created_at": 1769927092,
+      "children_ids": [
+        "msg_ee9ef21b712f"
+      ],
+      "model_info": null,
+      "usage": null,
+      "status": null,
+      "latency_ms": null,
+      "is_parallel_response": null,
+      "parallel_group_id": null,
+      "parallel_models": null
+    },
+    {
+      "id": "msg_ee9ef21b712f",
+      "parent_id": "msg_58427fc9258c",
+      "role": "assistant",
+      "content": "",
+      "type": "multi_model",
+      "created_at": 1769927094,
+      "children_ids": [],
+      "model_info": null,
+      "usage": null,
+      "status": null,
+      "latency_ms": null,
+      "is_parallel_response": true,
+      "parallel_group_id": null,
+      "parallel_models": [
+        {
+          "model": "qwen/qwen-2.5-7b-instruct",
+          "content": "我是基于阿里巴巴云开发的大规模语言模型Qwen。如果您有任何具体问题或需要帮助的内容，请告诉我，我会尽力提供支持。",
+          "latency_ms": 1827,
+          "model_info": {
+            "id": "qwen/qwen-2.5-7b-instruct",
+            "name": "qwen/qwen-2.5-7b-instruct",
+            "provider": "OpenRouter"
+          }
+        },
+        {
+          "model": "google/gemini-2.5-flash",
+          "content": "我是一个大型语言模型，由 Google 训练。",
+          "latency_ms": 1827,
+          "model_info": {
+            "id": "google/gemini-2.5-flash",
+            "name": "google/gemini-2.5-flash",
+            "provider": "OpenRouter"
+          }
+        }
+      ]
+    }
+  ],
+  "session_config": {
+    "source_name": "OpenRouter",
+    "models": [
+      "qwen/qwen-2.5-7b-instruct",
+      "google/gemini-2.5-flash"
+    ],
+    "temperature": 0.7,
+    "top_p": 1.0,
+    "system_prompt": null
+  },
+  "storage_path": "2026/02/2026-02-01_14-24-31-501-a1c9.json"
+}

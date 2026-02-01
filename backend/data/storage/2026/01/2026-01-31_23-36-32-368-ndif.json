@@ -1,0 +1,16 @@
+{
+  "id": "2026-01-31_23-36-32-368-ndif",
+  "title": "新对话",
+  "created_at": 1769873792,
+  "updated_at": 1769873792,
+  "system_prompt": null,
+  "messages": [],
+  "session_config": {
+    "source_name": null,
+    "models": [],
+    "temperature": 0.7,
+    "top_p": 1.0,
+    "system_prompt": null
+  },
+  "storage_path": "2026/01/2026-01-31_23-36-32-368-ndif.json"
+}

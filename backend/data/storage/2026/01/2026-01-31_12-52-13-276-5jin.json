@@ -1,0 +1,75 @@
+{
+  "id": "2026-01-31_12-52-13-276-5jin",
+  "title": "请给出归并排序的代码",
+  "created_at": 1769835133,
+  "updated_at": 1769835520,
+  "system_prompt": null,
+  "messages": [
+    {
+      "id": "msg_316c25fbc43d",
+      "parent_id": null,
+      "role": "user",
+      "content": "请给出归并排序的代码",
+      "type": "text",
+      "created_at": 1769835156,
+      "children_ids": [
+        "msg_dec8f7f8aad6"
+      ],
+      "model_info": null,
+      "usage": null,
+      "status": null,
+      "latency_ms": null,
+      "is_parallel_response": null,
+      "parallel_group_id": null,
+      "parallel_models": null
+    },
+    {
+      "id": "msg_dec8f7f8aad6",
+      "parent_id": "msg_316c25fbc43d",
+      "role": "assistant",
+      "content": "",
+      "type": "multi_model",
+      "created_at": 1769835168,
+      "children_ids": [],
+      "model_info": null,
+      "usage": null,
+      "status": null,
+      "latency_ms": null,
+      "is_parallel_response": true,
+      "parallel_group_id": null,
+      "parallel_models": [
+        {
+          "model": "qwen/qwen-2.5-7b-instruct",
+          "content": "当然可以，这里给出一个使用Python语言实现的归并排序的示例代码：\n\n```python\ndef merge_sort(arr):\n    if len(arr) > 1:\n        # 找到数组的中间索引\n        mid = len(arr) // 2\n\n        # 将数组分成两个部分\n        left_half = arr[:mid]\n        right_half = arr[mid:]\n\n        # 递归地对两个半部分进行排序\n        merge_sort(left_half)\n        merge_sort(right_half)\n\n        # 初始化指针，用于遍历左右两部分以及合并后的数组\n        i = j = k = 0\n\n        # 遍历左半部分和右半部分，直到其中一个被完全遍历\n        while i < len(left_half) and j < len(right_half):\n            if left_half[i] < right_half[j]:\n                # 如果左边元素小于右边元素，则将左边元素添加到合并列表中\n                arr[k] = left_half[i]\n                i += 1\n            else:\n                # 反之，将右边元素添加到合并列表中\n                arr[k] = right_half[j]\n                j += 1\n            k += 1\n\n        # 检查是否有剩余元素\n        while i < len(left_half):\n            arr[k] = left_half[i]\n            i += 1\n            k += 1\n        \n        while j < len(right_half):\n            arr[k] = right_half[j]\n            j += 1\n            k += 1\n\n# 测试数据\narr = [64, 34, 25, 12, 22, 11, 90]\nmerge_sort(arr)\nprint(\"归并排序后的数组：\", arr)\n```\n\n这段代码定义了一个`merge_sort`函数，该函数采用分而治之策略来对输入的数组进行排序。具体来说，首先检查数组长度是否大于1，如果大于1，则通过找到数组的中点将其分割为两个子数组；然后递归地对这两个子数组分别进行排序；最后通过合并这两个已排序的子数组来得到最终的有序数组。\n\n注意在实际应用中，递归调用可能会消耗大量的栈空间，对于非常大的数组可能需要考虑非递归的实现方式或优化递归方法以减少内存消耗。上述代码适用于小至中等规模的数据集。如果需要处理非常大的数据集，可能还需要考虑更高效的算法实现或者使用迭代器等其他技术手段。",
+          "latency_ms": 12079,
+          "model_info": {
+            "id": "qwen/qwen-2.5-7b-instruct",
+            "name": "qwen/qwen-2.5-7b-instruct",
+            "provider": "OpenRouter"
+          }
+        },
+        {
+          "model": "google/gemini-2.5-flash",
+          "content": "归并排序（Merge Sort）是一种基于分治思想的排序算法。它将待排序的序列分成若干个子序列，每个子序列都是有序的，然后再将子序列合并成一个完整的有序序列。\n\n以下是归并排序的 Python 实现：\n\n```python\ndef merge_sort(arr):\n    \"\"\"\n    归并排序函数\n    :param arr: 待排序的列表\n    :return: 排序后的列表\n    \"\"\"\n    if len(arr) <= 1:\n        return arr\n\n    # 分割：将列表一分为二\n    mid = len(arr) // 2\n    left_half = arr[:mid]\n    right_half = arr[mid:]\n\n    # 递归地对左右两部分进行排序\n    left_sorted = merge_sort(left_half)\n    right_sorted = merge_sort(right_half)\n\n    # 合并：将两个已排序的子列表合并成一个\n    return merge(left_sorted, right_sorted)\n\ndef merge(left, right):\n    \"\"\"\n    合并两个已排序的列表\n    :param left: 左边已排序的列表\n    :param right: 右边已排序的列表\n    :return: 合并后的已排序列表\n    \"\"\"\n    merged_list = []\n    i = 0  # 指向 left 列表的当前元素\n    j = 0  # 指向 right 列表的当前元素\n\n    # 比较两个列表的元素，并按顺序添加到 merged_list\n    while i < len(left) and j < len(right):\n        if left[i] <= right[j]:\n            merged_list.append(left[i])\n            i += 1\n        else:\n            merged_list.append(right[j])\n            j += 1\n\n    # 将剩余的元素添加到 merged_list (如果 left 或 right 中还有剩余元素)\n    while i < len(left):\n        merged_list.append(left[i])\n        i += 1\n\n    while j < len(right):\n        merged_list.append(right[j])\n        j += 1\n\n    return merged_list\n\n# 示例用法\nif __name__ == \"__main__\":\n    test_list1 = [38, 27, 43, 3, 9, 82, 10]\n    print(f\"原始列表1: {test_list1}\")\n    sorted_list1 = merge_sort(test_list1)\n    print(f\"排序后列表1: {sorted_list1}\")\n\n    test_list2 = [5, 2, 8, 1, 9, 4]\n    print(f\"\\n原始列表2: {test_list2}\")\n    sorted_list2 = merge_sort(test_list2)\n    print(f\"排序后列表2: {sorted_list2}\")\n\n    test_list3 = []\n    print(f\"\\n原始列表3: {test_list3}\")\n    sorted_list3 = merge_sort(test_list3)\n    print(f\"排序后列表3: {sorted_list3}\")\n\n    test_list4 = [7]\n    print(f\"\\n原始列表4: {test_list4}\")\n    sorted_list4 = merge_sort(test_list4)\n    print(f\"排序后列表4: {sorted_list4}\")\n\n    test_list5 = [9, 8, 7, 6, 5, 4, 3, 2, 1]\n    print(f\"\\n原始列表5: {test_list5}\")\n    sorted_list5 = merge_sort(test_list5)\n    print(f\"排序后列表5: {sorted_list5}\")\n```\n\n**代码解释：**\n\n1.  **`merge_sort(arr)` 函数：**\n    *   **基本情况 (Base Case):** 如果列表的长度小于或等于 1，则认为它已经是有序的，直接返回 `arr`。这是递归的终止条件。\n    *   **分割 (Divide):**\n        *   计算列表的中间索引 `mid`。\n        *   将列表 `arr` 分割成 `left_half` (从开头到 `mid`，不包含 `mid`) 和 `right_half` (从 `mid` 到结尾)。\n    *   **递归排序 (Conquer):**\n        *   递归调用 `merge_sort` 对 `left_half` 进行排序，得到 `left_sorted`。\n        *   递归调用 `merge_sort` 对 `right_half` 进行排序，得到 `right_sorted`。\n    *   **合并 (Combine):**\n        *   调用 `merge` 函数将两个已排序的子列表 `left_sorted` 和 `right_sorted` 合并成一个完整的有序列表，并返回结果。\n\n2.  **`merge(left, right)` 函数：**\n    *   这个函数负责将两个已经排序好的列表 `left` 和 `right` 合并成一个新的、完整的排序列表。\n    *   初始化一个空列表 `merged_list` 来存放合并后的结果。\n    *   初始化两个指针 `i` 和 `j`，分别指向 `left` 和 `right` 列表的第一个元素。\n    *   **主循环：**\n        *   当 `i` 和 `j` 都没有超出各自列表的范围时，比较 `left[i]` 和 `right[j]`。\n        *   将较小的元素添加到 `merged_list` 中，并移动相应列表的指针。\n    *   **处理剩余元素：**\n        *   在主循环结束后，如果 `left` 列表还有剩余元素（`i < len(left)`），说明 `right` 列表已经全部添加到 `merged_list` 中了，将 `left` 中剩余的所有元素依次添加到 `merged_list` 中。\n        *   同理，如果 `right` 列表还有剩余元素，将其全部添加到 `merged_list` 中。\n    *   返回 `merged_list`。\n\n**归并排序的特点：**\n\n*   **稳定性：** 归并排序是稳定的排序算法，即相等元素的相对顺序在排序前后保持不变。\n*   **时间复杂度：** \n    *   最好、最坏、平均情况都是 O(n log n)。这是因为无论输入数据如何，它总是将列表分成两半，然后合并。\n*   **空间复杂度：** O(n)。因为在合并过程中需要额外的空间来存储合并后的列表。递归调用栈也会占用 O(log n) 的空间。\n*   **适用性：** 适用于大数据集，因为它具有稳定的性能。也常用于外部排序，即数据量大到无法一次性载入内存时。",
+          "latency_ms": 12079,
+          "model_info": {
+            "id": "google/gemini-2.5-flash",
+            "name": "google/gemini-2.5-flash",
+            "provider": "OpenRouter"
+          }
+        }
+      ]
+    }
+  ],
+  "session_config": {
+    "source_name": "OpenRouter",
+    "models": [
+      "qwen/qwen-2.5-7b-instruct",
+      "google/gemini-2.5-flash"
+    ],
+    "temperature": 0.7,
+    "top_p": 1.0,
+    "system_prompt": null
+  },
+  "storage_path": "2026/01/2026-01-31_12-52-13-276-5jin.json"
+}

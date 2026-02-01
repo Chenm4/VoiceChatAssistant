@@ -1,0 +1,59 @@
+{
+  "id": "2026-01-31_23-58-28-216-vjct",
+  "title": "哎，真的是。",
+  "created_at": 1769875108,
+  "updated_at": 1769917904,
+  "system_prompt": null,
+  "messages": [
+    {
+      "id": "msg_f177793d2342",
+      "parent_id": null,
+      "role": "user",
+      "content": "哎，真的是。",
+      "type": "text",
+      "created_at": 1769876581,
+      "children_ids": [
+        "msg_aa43d766ad86"
+      ],
+      "model_info": null,
+      "usage": null,
+      "status": null,
+      "latency_ms": null,
+      "is_parallel_response": null,
+      "parallel_group_id": null,
+      "parallel_models": null
+    },
+    {
+      "id": "msg_aa43d766ad86",
+      "parent_id": "msg_f177793d2342",
+      "role": "assistant",
+      "content": "看来您似乎遇到了一些事情，能具体说说发生了什么吗？这样我或许能更好地帮助您。如果您只是想聊天，也可以随便说说看哦。",
+      "type": "text",
+      "created_at": 1769876584,
+      "children_ids": [],
+      "model_info": {
+        "id": "qwen/qwen-2.5-7b-instruct",
+        "name": "qwen/qwen-2.5-7b-instruct",
+        "provider": "OpenRouter"
+      },
+      "usage": {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0
+      },
+      "status": "success",
+      "latency_ms": 2998,
+      "is_parallel_response": null,
+      "parallel_group_id": null,
+      "parallel_models": null
+    }
+  ],
+  "session_config": {
+    "source_name": null,
+    "models": [],
+    "temperature": 0.7,
+    "top_p": 1.0,
+    "system_prompt": null
+  },
+  "storage_path": "2026/01/2026-01-31_23-58-28-216-vjct.json"
+}

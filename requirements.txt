@@ -1,0 +1,18 @@
+# Web 框架
+fastapi==0.104.1
+uvicorn==0.24.0
+python-multipart==0.0.6
+
+# WebSocket
+websockets==12.0
+aiohttp==3.9.1
+
+# OpenAI SDK
+openai==1.6.1
+
+# 音频处理
+pyaudio==0.2.14
+
+# 其他
+pydantic==2.5.0
+python-dotenv==1.0.0

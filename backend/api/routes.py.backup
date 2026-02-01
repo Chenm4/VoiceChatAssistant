@@ -1,0 +1,637 @@
+"""
+API 路由定义
+"""
+
+import json
+import os
+import sys
+from pathlib import Path
+from typing import List
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
+
+# 添加项目根目录到路径
+sys.path.append(str(Path(__file__).parent.parent.parent))
+
+from backend.api.models import (
+    ConfigModel,
+    ConfigSource,
+    ConfigList,
+    ChatRequest, 
+    ChatResponse,
+    RecordingResponse,
+    ChatMessage,
+    Session,
+    SessionList,
+    MessageUpdateRequest,
+    BatchDeleteRequest
+)
+from backend.services.audio_recorder import AudioRecorder
+from backend.services.voice_recognizer import VoiceRecognizer
+from backend.services.session_storage import session_storage
+from backend.utils.logger import get_api_logger
+from backend.utils.id_generator import generate_session_id
+from openai import OpenAI
+import time
+
+# 导入配置
+try:
+    from config import OPENAI_CONFIG, DEFAULT_CONFIG_NAME
+except ImportError:
+    OPENAI_CONFIG = [
+        {
+            "name": "OpenAI",
+            "api_key": "",
+            "models": ["gpt-3.5-turbo", "gpt-4"],
+            "base_url": "https://api.openai.com/v1"
+        }
+    ]
+    DEFAULT_CONFIG_NAME = "OpenAI"
+
+logger = get_api_logger()
+
+# 创建路由器
+router = APIRouter()
+
+# 全局服务实例
+audio_recorder = AudioRecorder()
+voice_recognizer = VoiceRecognizer()
+openai_client = None
+
+# 从 config.py 读取初始配置
+config_sources = [ConfigSource(**source) for source in OPENAI_CONFIG]
+
+# 找到默认配置源
+default_source = next((s for s in config_sources if s.name == DEFAULT_CONFIG_NAME), config_sources[0])
+current_config = ConfigList(
+    sources=config_sources,
+    current_source=default_source.name,
+    current_model=default_source.models[0] if default_source.models else "gpt-3.5-turbo"
+)
+
+# 向后兼容的单一配置
+api_config = ConfigModel(
+    api_key=default_source.api_key,
+    model=current_config.current_model,
+    base_url=default_source.base_url
+)
+
+# 会话管理
+sessions: List[Session] = []
+current_session_id: str = None
+
+# 初始化默认会话
+def init_default_session():
+    """初始化默认会话"""
+    global sessions, current_session_id
+    session_id = generate_session_id()
+    current_time = int(time.time())
+    default_session = Session(
+        id=session_id,
+        title="新对话",
+        created_at=current_time,
+        updated_at=current_time,
+        messages=[]
+    )
+    sessions.append(default_session)
+    current_session_id = session_id
+    logger.info(f"创建新会话: {session_id}")
+    save_sessions_to_storage()
+    return default_session
+
+def load_sessions_from_storage():
+    """从存储加载会话"""
+    global sessions, current_session_id
+    loaded_sessions = session_storage.load_sessions()
+    
+    if loaded_sessions:
+        sessions = loaded_sessions
+        # 尝试加载上次的当前会话 ID
+        try:
+            with open(session_storage.storage_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                current_session_id = data.get('current_session_id')
+        except:
+            pass
+        
+        # 如果没有当前会话，选择第一个
+        if not current_session_id and sessions:
+            current_session_id = sessions[0].id
+        
+        logger.info(f"从存储加载会话: {len(sessions)} 个，当前会话: {current_session_id}")
+    else:
+        # 如果没有会话，创建默认会话
+        logger.info("未找到已保存的会话，创建默认会话")
+        init_default_session()
+
+def save_sessions_to_storage():
+    """保存会话到存储"""
+    session_storage.save_sessions(sessions, current_session_id)
+
+# 加载会话
+load_sessions_from_storage()
+
+# 辅助函数：获取当前会话
+def get_current_session() -> Session:
+    """获取当前会话"""
+    current_session = next((s for s in sessions if s.id == current_session_id), None)
+    if not current_session:
+        # 如果当前会话不存在，创建新会话
+        return init_default_session()
+    return current_session
+
+def get_conversation_history() -> List[ChatMessage]:
+    """获取当前会话的消息历史（向后兼容）"""
+    return get_current_session().messages
+
+# 如果配置了 API Key，自动初始化客户端
+if api_config.api_key:
+    try:
+        openai_client = OpenAI(
+            api_key=api_config.api_key,
+            base_url=api_config.base_url
+        )
+        logger.info(f"从 config.py 加载 OpenAI 配置成功: {current_config.current_source} - {current_config.current_model}")
+    except Exception as e:
+        logger.error(f"初始化 OpenAI 客户端失败: {e}")
+
+
+@router.get("/config")
+async def get_config():
+    """获取所有 API 配置"""
+    logger.info("获取配置列表")
+    return current_config.dict()
+
+
+@router.post("/config/switch")
+async def switch_config(source_name: str, model: str):
+    """切换配置源和模型"""
+    global openai_client, api_config, current_config
+    
+    # 查找配置源
+    source = next((s for s in config_sources if s.name == source_name), None)
+    if not source:
+        raise HTTPException(status_code=404, detail=f"配置源 {source_name} 不存在")
+    
+    # 检查模型是否在该源的模型列表中
+    if model not in source.models:
+        raise HTTPException(status_code=400, detail=f"模型 {model} 不在配置源 {source_name} 的模型列表中")
+    
+    # 更新当前配置
+    current_config.current_source = source_name
+    current_config.current_model = model
+    
+    # 更新向后兼容的配置
+    api_config = ConfigModel(
+        api_key=source.api_key,
+        model=model,
+        base_url=source.base_url
+    )
+    
+    logger.info(f"切换配置: {source_name} - {model}")
+    
+    # 重新初始化 OpenAI 客户端
+    if api_config.api_key:
+        try:
+            openai_client = OpenAI(
+                api_key=api_config.api_key,
+                base_url=api_config.base_url
+            )
+            logger.info("OpenAI 客户端初始化成功")
+        except Exception as e:
+            logger.error(f"OpenAI 客户端初始化失败: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    return {"success": True, "message": f"已切换到 {source_name} - {model}"}
+
+
+@router.post("/config/update")
+async def update_config_source(source: ConfigSource):
+    """更新某个配置源（如修改 API Key）"""
+    global config_sources, current_config, api_config, openai_client
+    
+    # 查找并更新配置源
+    for i, s in enumerate(config_sources):
+        if s.name == source.name:
+            config_sources[i] = source
+            logger.info(f"更新配置源: {source.name}")
+            
+            # 如果是当前使用的配置源，更新 api_config 和客户端
+            if current_config.current_source == source.name:
+                api_config = ConfigModel(
+                    api_key=source.api_key,
+                    model=current_config.current_model,
+                    base_url=source.base_url
+                )
+                
+                if api_config.api_key:
+                    try:
+                        openai_client = OpenAI(
+                            api_key=api_config.api_key,
+                            base_url=api_config.base_url
+                        )
+                        logger.info("OpenAI 客户端重新初始化成功")
+                    except Exception as e:
+                        logger.error(f"OpenAI 客户端重新初始化失败: {e}", exc_info=True)
+                        raise HTTPException(status_code=500, detail=str(e))
+            
+            return {"success": True, "message": f"配置源 {source.name} 已更新"}
+    
+    raise HTTPException(status_code=404, detail=f"配置源 {source.name} 不存在")
+
+
+@router.post("/config")
+async def save_config(config: ConfigModel):
+    """保存 API 配置（向后兼容接口）"""
+    global openai_client, api_config
+    
+    api_config = config
+    
+    logger.info(f"保存配置: base_url={config.base_url}, model={config.model}")
+    
+    # 初始化 OpenAI 客户端
+    if config.api_key:
+        try:
+            openai_client = OpenAI(
+                api_key=config.api_key,
+                base_url=config.base_url
+            )
+            logger.info("OpenAI 客户端初始化成功")
+        except Exception as e:
+            logger.error(f"OpenAI 客户端初始化失败: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    return {"success": True, "message": "配置已保存"}
+
+
+@router.post("/recording/start")
+async def start_recording():
+    """开始录音"""
+    logger.info("开始录音请求")
+    
+    try:
+        audio_recorder.start()
+        return RecordingResponse(success=True, message="开始录音")
+    except Exception as e:
+        logger.error(f"启动录音失败: {e}", exc_info=True)
+        return RecordingResponse(success=False, message=str(e))
+
+
+@router.post("/recording/stop")
+async def stop_recording():
+    """停止录音并识别"""
+    logger.info("停止录音请求")
+    
+    try:
+        audio_file = audio_recorder.stop()
+        
+        if not audio_file:
+            logger.warning("没有录到音频")
+            return RecordingResponse(success=False, message="没有录到音频")
+        
+        logger.info(f"音频文件: {audio_file}")
+        
+        # 识别音频
+        text = await voice_recognizer.recognize_file(audio_file)
+        
+        # 删除临时文件
+        try:
+            os.remove(audio_file)
+        except:
+            pass
+        
+        if text:
+            logger.info(f"识别成功: {text}")
+            return RecordingResponse(success=True, text=text)
+        else:
+            logger.warning("识别失败")
+            return RecordingResponse(success=False, message="识别失败，请确保说话清晰")
+            
+    except Exception as e:
+        logger.error(f"录音处理失败: {e}", exc_info=True)
+        return RecordingResponse(success=False, message=str(e))
+
+
+@router.post("/chat")
+async def chat(request: ChatRequest):
+    """发送消息（流式返回）"""
+    global openai_client
+    
+    if not openai_client:
+        logger.error("OpenAI 客户端未初始化")
+        raise HTTPException(status_code=400, detail="请先配置 API Key")
+    
+    if not request.message:
+        raise HTTPException(status_code=400, detail="消息不能为空")
+    
+    logger.info(f"收到聊天请求: {request.message[:50]}...")
+    
+    # 获取当前会话
+    current_session = get_current_session()
+    
+    # 添加用户消息到当前会话
+    current_session.messages.append(
+        ChatMessage(role="user", content=request.message)
+    )
+    current_session.updated_at = int(time.time())
+    
+    # 如果是第一条消息，自动生成标题（取前20个字符）
+    if len(current_session.messages) == 1 and current_session.title == "新对话":
+        current_session.title = request.message[:20] + ("..." if len(request.message) > 20 else "")
+    
+    async def generate():
+        import asyncio
+        try:
+            # 转换为 OpenAI 格式
+            messages = [{"role": msg.role, "content": msg.content} for msg in current_session.messages]
+            
+            logger.info(f"🚀 开始流式调用: model={api_config.model}, session={current_session_id}")
+            
+            # 调用 OpenAI API（流式）
+            stream = openai_client.chat.completions.create(
+                model=api_config.model,
+                messages=messages,
+                stream=True
+            )
+            
+            assistant_message = ''
+            chunk_count = 0
+            last_log_time = time.time()
+            
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    assistant_message += content
+                    chunk_count += 1
+                    
+                    # 立即发送这个 chunk
+                    chunk_data = f"data: {json.dumps({'type': 'content', 'data': content}, ensure_ascii=False)}\n\n"
+                    yield chunk_data
+                    
+                    # 强制让出控制权，确保立即发送
+                    await asyncio.sleep(0)
+                    
+                    # 每 10 个 chunk 或每 2 秒记录一次日志
+                    current_time = time.time()
+                    if chunk_count % 10 == 0 or (current_time - last_log_time) >= 2:
+                        logger.info(f"📤 已发送 {chunk_count} 个chunks, 当前长度: {len(assistant_message)}")
+                        last_log_time = current_time
+            
+            logger.info(f"✅ 流式发送完成: {chunk_count} 个chunks")
+            
+            # 添加助手消息到当前会话
+            current_session.messages.append(
+                ChatMessage(role="assistant", content=assistant_message)
+            )
+            current_session.updated_at = int(time.time())
+            
+            # 保存到存储
+            save_sessions_to_storage()
+            
+            logger.info(f"💾 AI 回复完成并保存，总长度: {len(assistant_message)}, session={current_session_id}")
+            
+            # 发送完成信号
+            yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+            
+        except Exception as e:
+            logger.error(f"❌ AI 调用出错: {e}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+    
+    return StreamingResponse(
+        generate(), 
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # 禁用 Nginx 缓冲
+        }
+    )
+
+
+@router.post("/chat/clear")
+async def clear_chat():
+    """清空当前会话的对话历史"""
+    current_session = get_current_session()
+    
+    logger.info(f"清空会话 {current_session_id} 的对话历史")
+    current_session.messages = []
+    current_session.updated_at = int(time.time())
+    
+    # 保存到存储
+    save_sessions_to_storage()
+    
+    return {"success": True, "message": "对话已清空"}
+
+
+@router.get("/chat/history")
+async def get_history():
+    """获取当前会话的对话历史"""
+    return {"history": [msg.dict() for msg in get_conversation_history()]}
+
+
+# ==================== 会话管理 API ====================
+
+@router.get("/sessions")
+async def get_sessions():
+    """获取所有会话列表"""
+    logger.info("获取会话列表")
+    
+    # 按 updated_at 降序排序
+    sorted_sessions = sorted(sessions, key=lambda s: s.updated_at, reverse=True)
+    
+    return SessionList(
+        sessions=sorted_sessions,
+        current_session_id=current_session_id
+    ).dict()
+
+
+@router.post("/sessions")
+async def create_session(title: str = "新对话"):
+    """创建新会话"""
+    global current_session_id
+    
+    session_id = generate_session_id()
+    current_time = int(time.time())
+    
+    new_session = Session(
+        id=session_id,
+        title=title,
+        created_at=current_time,
+        updated_at=current_time,
+        messages=[]
+    )
+    
+    sessions.append(new_session)
+    current_session_id = session_id
+    
+    logger.info(f"创建新会话: {session_id} - {title}")
+    
+    # 保存到存储
+    save_sessions_to_storage()
+    
+    return {
+        "success": True,
+        "message": "会话创建成功",
+        "session": new_session.dict()
+    }
+
+
+@router.get("/sessions/{session_id}")
+async def get_session(session_id: str):
+    """获取指定会话的详情"""
+    session = next((s for s in sessions if s.id == session_id), None)
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    
+    logger.info(f"获取会话详情: {session_id}")
+    return session.dict()
+
+
+@router.post("/sessions/{session_id}/switch")
+async def switch_session(session_id: str):
+    """切换到指定会话"""
+    global current_session_id
+    
+    session = next((s for s in sessions if s.id == session_id), None)
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    
+    current_session_id = session_id
+    session.updated_at = int(time.time())
+    
+    logger.info(f"切换到会话: {session_id} - {session.title}")
+    
+    # 保存到存储
+    save_sessions_to_storage()
+    
+    return {
+        "success": True,
+        "message": "会话切换成功",
+        "session": session.dict()
+    }
+
+
+@router.put("/sessions/{session_id}/title")
+async def update_session_title(session_id: str, title: str):
+    """更新会话标题"""
+    session = next((s for s in sessions if s.id == session_id), None)
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    
+    session.title = title
+    session.updated_at = int(time.time())
+    
+    logger.info(f"更新会话标题: {session_id} -> {title}")
+    
+    # 保存到存储
+    save_sessions_to_storage()
+    
+    return {
+        "success": True,
+        "message": "标题更新成功",
+        "session": session.dict()
+    }
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """删除会话"""
+    global current_session_id, sessions
+    
+    session = next((s for s in sessions if s.id == session_id), None)
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    
+    # 不允许删除最后一个会话
+    if len(sessions) == 1:
+        raise HTTPException(status_code=400, detail="至少需要保留一个会话")
+    
+    # 如果删除的是当前会话，切换到其他会话
+    if session_id == current_session_id:
+        # 切换到列表中的第一个非当前会话
+        for s in sessions:
+            if s.id != session_id:
+                current_session_id = s.id
+                break
+    
+    sessions.remove(session)
+    
+    logger.info(f"删除会话: {session_id} - {session.title}")
+    
+    # 保存到存储
+    save_sessions_to_storage()
+    
+    return {
+        "success": True,
+        "message": "会话删除成功",
+        "current_session_id": current_session_id
+    }
+
+
+# ==================== 消息管理 API ====================
+
+@router.put("/sessions/{session_id}/messages/{message_index}")
+async def update_message(session_id: str, message_index: int, request: MessageUpdateRequest):
+    """更新指定会话的指定消息"""
+    session = next((s for s in sessions if s.id == session_id), None)
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    
+    if message_index < 0 or message_index >= len(session.messages):
+        raise HTTPException(status_code=400, detail="消息索引无效")
+    
+    # 更新消息内容
+    session.messages[message_index].content = request.content
+    session.updated_at = int(time.time())
+    
+    logger.info(f"更新消息: session={session_id}, index={message_index}")
+    
+    # 保存到存储
+    save_sessions_to_storage()
+    
+    return {
+        "success": True,
+        "message": "消息更新成功",
+        "updated_message": session.messages[message_index].dict()
+    }
+
+
+@router.post("/sessions/{session_id}/messages/delete")
+async def delete_messages(session_id: str, request: BatchDeleteRequest):
+    """删除指定会话的消息（支持单条或多条）"""
+    session = next((s for s in sessions if s.id == session_id), None)
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    
+    if not request.message_indices:
+        raise HTTPException(status_code=400, detail="未指定要删除的消息")
+    
+    # 验证所有索引
+    for index in request.message_indices:
+        if index < 0 or index >= len(session.messages):
+            raise HTTPException(status_code=400, detail=f"消息索引 {index} 无效")
+    
+    # 按倒序删除，避免索引变化
+    sorted_indices = sorted(request.message_indices, reverse=True)
+    deleted_count = len(sorted_indices)
+    
+    for index in sorted_indices:
+        session.messages.pop(index)
+    
+    session.updated_at = int(time.time())
+    
+    logger.info(f"删除消息: session={session_id}, count={deleted_count}, indices={request.message_indices}")
+    
+    # 保存到存储
+    save_sessions_to_storage()
+    
+    return {
+        "success": True,
+        "message": f"成功删除 {deleted_count} 条消息"
+    }

@@ -1,0 +1,243 @@
+{
+  "id": "2026-01-31_16-58-24-093-x01f",
+  "title": "我靠，现在这是什么？很奇怪啊。",
+  "created_at": 1769849904,
+  "updated_at": 1769850638,
+  "system_prompt": null,
+  "messages": [
+    {
+      "id": "msg_aab109cbaf51",
+      "parent_id": null,
+      "role": "user",
+      "content": "我靠，现在这是什么？很奇怪啊。",
+      "type": "text",
+      "created_at": 1769850314,
+      "children_ids": [
+        "msg_8b269623f268"
+      ],
+      "model_info": null,
+      "usage": null,
+      "status": null,
+      "latency_ms": null,
+      "is_parallel_response": null,
+      "parallel_group_id": null,
+      "parallel_models": null
+    },
+    {
+      "id": "msg_8b269623f268",
+      "parent_id": "msg_aab109cbaf51",
+      "role": "assistant",
+      "content": "你好！你现在看到的是一个基于文本的对话界面，我可以理解并回答你用中文提出的问题或请求。这是一个语言模型助手，旨在帮助用户获取信息、解决问题或者进行文字创作等。如果你有任何具体问题或需要帮助的地方，可以直接告诉我哦！我会尽力提供帮助。",
+      "type": "text",
+      "created_at": 1769850318,
+      "children_ids": [],
+      "model_info": {
+        "id": "qwen/qwen-2.5-7b-instruct",
+        "name": "qwen/qwen-2.5-7b-instruct",
+        "provider": "OpenRouter"
+      },
+      "usage": {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0
+      },
+      "status": "success",
+      "latency_ms": 3174,
+      "is_parallel_response": null,
+      "parallel_group_id": null,
+      "parallel_models": null
+    },
+    {
+      "id": "msg_ff931c3f20f1",
+      "parent_id": null,
+      "role": "user",
+      "content": "我靠，这个",
+      "type": "text",
+      "created_at": 1769850474,
+      "children_ids": [
+        "msg_f46600f5af3c"
+      ],
+      "model_info": null,
+      "usage": null,
+      "status": null,
+      "latency_ms": null,
+      "is_parallel_response": null,
+      "parallel_group_id": null,
+      "parallel_models": null
+    },
+    {
+      "id": "msg_f46600f5af3c",
+      "parent_id": "msg_ff931c3f20f1",
+      "role": "assistant",
+      "content": "看起来您可能有些惊讶或者不满意。能告诉我具体是关于什么的情况吗？我会尽力帮助您解决或提供更好的建议。如果是网络延迟或者其它问题，请您具体描述一下，方便我更好地提供帮助。",
+      "type": "text",
+      "created_at": 1769850476,
+      "children_ids": [],
+      "model_info": {
+        "id": "qwen/qwen-2.5-7b-instruct",
+        "name": "qwen/qwen-2.5-7b-instruct",
+        "provider": "OpenRouter"
+      },
+      "usage": {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0
+      },
+      "status": "success",
+      "latency_ms": 1774,
+      "is_parallel_response": null,
+      "parallel_group_id": null,
+      "parallel_models": null
+    },
+    {
+      "id": "msg_e55355278686",
+      "parent_id": null,
+      "role": "user",
+      "content": "测试",
+      "type": "text",
+      "created_at": 1769850481,
+      "children_ids": [
+        "msg_af1adcb28d31"
+      ],
+      "model_info": null,
+      "usage": null,
+      "status": null,
+      "latency_ms": null,
+      "is_parallel_response": null,
+      "parallel_group_id": null,
+      "parallel_models": null
+    },
+    {
+      "id": "msg_af1adcb28d31",
+      "parent_id": "msg_e55355278686",
+      "role": "assistant",
+      "content": "您好！您是想进行技术测试还是有其他方面的测试需求呢？请提供更多详细信息，我会尽力提供帮助。",
+      "type": "text",
+      "created_at": 1769850483,
+      "children_ids": [],
+      "model_info": {
+        "id": "qwen/qwen-2.5-7b-instruct",
+        "name": "qwen/qwen-2.5-7b-instruct",
+        "provider": "OpenRouter"
+      },
+      "usage": {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0
+      },
+      "status": "success",
+      "latency_ms": 2021,
+      "is_parallel_response": null,
+      "parallel_group_id": null,
+      "parallel_models": null
+    },
+    {
+      "id": "msg_287f45fe253d",
+      "parent_id": null,
+      "role": "user",
+      "content": "测试测试，可以。",
+      "type": "text",
+      "created_at": 1769850622,
+      "children_ids": [
+        "msg_b9615a915595"
+      ],
+      "model_info": null,
+      "usage": null,
+      "status": null,
+      "latency_ms": null,
+      "is_parallel_response": null,
+      "parallel_group_id": null,
+      "parallel_models": null
+    },
+    {
+      "id": "msg_b9615a915595",
+      "parent_id": "msg_287f45fe253d",
+      "role": "assistant",
+      "content": "可以！您有什么想要测试的内容或问题需要帮助吗？您可以告诉我具体需求，比如语言翻译、知识问答、创意写作等，我会尽力提供帮助。",
+      "type": "text",
+      "created_at": 1769850625,
+      "children_ids": [],
+      "model_info": {
+        "id": "qwen/qwen-2.5-7b-instruct",
+        "name": "qwen/qwen-2.5-7b-instruct",
+        "provider": "OpenRouter"
+      },
+      "usage": {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0
+      },
+      "status": "success",
+      "latency_ms": 2665,
+      "is_parallel_response": null,
+      "parallel_group_id": null,
+      "parallel_models": null
+    },
+    {
+      "id": "msg_91d408ae6258",
+      "parent_id": null,
+      "role": "user",
+      "content": "测试效果",
+      "type": "text",
+      "created_at": 1769850635,
+      "children_ids": [
+        "msg_decad2384462"
+      ],
+      "model_info": null,
+      "usage": null,
+      "status": null,
+      "latency_ms": null,
+      "is_parallel_response": null,
+      "parallel_group_id": null,
+      "parallel_models": null
+    },
+    {
+      "id": "msg_decad2384462",
+      "parent_id": "msg_91d408ae6258",
+      "role": "assistant",
+      "content": "",
+      "type": "multi_model",
+      "created_at": 1769850638,
+      "children_ids": [],
+      "model_info": null,
+      "usage": null,
+      "status": null,
+      "latency_ms": null,
+      "is_parallel_response": true,
+      "parallel_group_id": null,
+      "parallel_models": [
+        {
+          "model": "qwen/qwen-2.5-7b-instruct",
+          "content": "当然，我可以帮助你测试和评估不同场景的效果。请告诉我具体的测试目标或场景是什么？例如：\n\n1. 你是想要测试某个产品的性能？\n2. 是否有关于某个模型或算法的表现需要评估？\n3. 在社交媒体上的营销活动是否需要评估效果？\n4. 还是其他类型的测试？\n\n请提供更多详细信息，这样我才能更好地帮助你进行测试和效果评估。",
+          "latency_ms": 2555,
+          "model_info": {
+            "id": "qwen/qwen-2.5-7b-instruct",
+            "name": "qwen/qwen-2.5-7b-instruct",
+            "provider": "OpenRouter"
+          }
+        },
+        {
+          "model": "google/gemini-2.5-flash",
+          "content": "好的，请您提供您想要测试的效果。\n\n我可以帮助您测试各种效果，例如：\n\n* **软件或应用程序的功能**：您想测试某个软件或应用程序的特定功能是否正常工作？\n* **网站的可用性或用户体验**：您想了解用户在您的网站上是否能轻松找到所需信息，或者是否存在任何阻碍？\n* **UI/UX设计**：您想测试您的界面设计是否直观、美观，用户是否容易上手？\n* **性能**：您想测试您的系统在特定负载下是否能保持稳定和快速？\n* **安全性**：您想测试您的系统是否存在任何安全漏洞？\n* **营销文案或广告效果**：您想知道您的广告文案是否能吸引目标受众，或者某个营销活动的效果如何？\n* **产品原型或概念**：您想了解潜在用户对您的产品原型或新概念的看法？\n* **音效或视觉效果**：您想测试某个音效或视觉效果在特定场景下的表现？\n\n请您详细描述您想要测试的内容，以及您希望达成的目标，我会尽力为您提供帮助和反馈。",
+          "latency_ms": 2554,
+          "model_info": {
+            "id": "google/gemini-2.5-flash",
+            "name": "google/gemini-2.5-flash",
+            "provider": "OpenRouter"
+          }
+        }
+      ]
+    }
+  ],
+  "session_config": {
+    "source_name": "OpenRouter",
+    "models": [
+      "qwen/qwen-2.5-7b-instruct",
+      "google/gemini-2.5-flash"
+    ],
+    "temperature": 0.7,
+    "top_p": 1.0,
+    "system_prompt": null
+  },
+  "storage_path": "2026/01/2026-01-31_16-58-24-093-x01f.json"
+}
