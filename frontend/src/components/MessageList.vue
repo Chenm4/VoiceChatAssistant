@@ -131,11 +131,11 @@
                 <button
                   v-for="(modelMsg, modelIndex) in (msg.models || msg.parallel_models || [])"
                   :key="`selector-${modelIndex}`"
-                  @click="toggleModelView(index, modelIndex)"
+                  @click="toggleModelView(index, msg, modelIndex)"
                   class="model-selector-btn"
                   :class="{ 
-                    'active': fullscreenModelIndex[index] === modelIndex,
-                    'inactive': fullscreenModelIndex[index] !== undefined && fullscreenModelIndex[index] !== modelIndex
+                    'active': getFocusedModelIndex(index, msg) === modelIndex,
+                    'inactive': getFocusedModelIndex(index, msg) !== undefined && getFocusedModelIndex(index, msg) !== modelIndex
                   }"
                 >
                   <el-tag 
@@ -147,8 +147,8 @@
                   </el-tag>
                 </button>
                 <button
-                  v-if="fullscreenModelIndex[index] !== undefined"
-                  @click="exitFullscreen(index)"
+                  v-if="getFocusedModelIndex(index, msg) !== undefined"
+                  @click="exitFocused(index)"
                   class="model-selector-btn exit-fullscreen-btn"
                   title="返回并排显示"
                 >
@@ -158,41 +158,69 @@
               </div>
               
               <!-- 模型消息卡片容器 -->
-              <div class="model-cards-container" :class="{ 'fullscreen-mode': fullscreenModelIndex[index] !== undefined }">
-                <div 
-                  v-for="(modelMsg, modelIndex) in (msg.models || msg.parallel_models || [])" 
-                  :key="modelIndex"
-                  v-show="fullscreenModelIndex[index] === undefined || fullscreenModelIndex[index] === modelIndex"
-                  class="model-message-card"
-                  :class="{ 'fullscreen-card': fullscreenModelIndex[index] === modelIndex }"
+              <div
+                class="model-view-wrapper"
+                :class="{ 'focused-mode': getFocusedModelIndex(index, msg) !== undefined }"
+                @mouseenter="setActiveFocusedMessage(index, msg)"
+              >
+                <button
+                  v-if="getFocusedModelIndex(index, msg) !== undefined"
+                  @click="navigateModel(index, msg, -1)"
+                  class="model-nav-btn model-nav-left"
+                  title="切换到上一个模型"
                 >
-                  <!-- 消息内容 -->
-                  <div class="bubble-content">
-                    <div class="message-text">
-                      <div class="markdown-body" v-html="renderMarkdown(modelMsg.content)"></div>
-                      <div v-if="(isTyping && index === messages.length - 1 && !modelMsg.content) || msg.is_typing_dots" class="flex gap-1 mt-2">
-                        <span class="w-2 h-2 rounded-full bg-gray-400 typing-dot"></span>
-                        <span class="w-2 h-2 rounded-full bg-gray-400 typing-dot"></span>
-                        <span class="w-2 h-2 rounded-full bg-gray-400 typing-dot"></span>
+                  <i class="fas fa-chevron-left"></i>
+                </button>
+                <div class="model-cards-container" :class="{ 'fullscreen-mode': getFocusedModelIndex(index, msg) !== undefined }">
+                  <div 
+                    v-for="(modelMsg, modelIndex) in (msg.models || msg.parallel_models || [])" 
+                    :key="modelIndex"
+                    v-show="getFocusedModelIndex(index, msg) === undefined || getFocusedModelIndex(index, msg) === modelIndex"
+                    class="model-message-card"
+                    :class="{ 'fullscreen-card': getFocusedModelIndex(index, msg) === modelIndex }"
+                    :style="getModelCardStyle(index, msg)"
+                  >
+                    <!-- 消息内容 -->
+                    <div class="bubble-content">
+                      <div class="message-text">
+                        <div class="markdown-body" v-html="renderMarkdown(modelMsg.content)"></div>
+                        <div v-if="(isTyping && index === messages.length - 1 && !modelMsg.content) || msg.is_typing_dots" class="flex gap-1 mt-2">
+                          <span class="w-2 h-2 rounded-full bg-gray-400 typing-dot"></span>
+                          <span class="w-2 h-2 rounded-full bg-gray-400 typing-dot"></span>
+                          <span class="w-2 h-2 rounded-full bg-gray-400 typing-dot"></span>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                  
-                  <!-- 操作按钮 -->
-                  <div v-if="!isSelectionMode" class="message-actions-outer">
-                    <button @click="copyMessage(modelMsg.content, $event)" class="btn-action" title="复制">
-                      <i class="fas fa-copy"></i>
-                    </button>
-                    <button 
-                      v-if="fullscreenModelIndex[index] === undefined"
-                      @click="enterFullscreen(index, modelIndex)" 
-                      class="btn-action" 
-                      title="全屏显示"
-                    >
-                      <i class="fas fa-expand"></i>
-                    </button>
+                    
+                    <!-- 操作按钮 -->
+                    <div v-if="!isSelectionMode" class="message-actions-outer">
+                      <button @click="copyMessage(modelMsg.content, $event)" class="btn-action" title="复制">
+                        <i class="fas fa-copy"></i>
+                      </button>
+                      <button 
+                        v-if="getFocusedModelIndex(index, msg) === undefined"
+                        @click="enterFocused(index, msg, modelIndex)" 
+                        class="btn-action" 
+                        title="聚焦显示"
+                      >
+                        <i class="fas fa-expand"></i>
+                      </button>
+                    </div>
+                    <div
+                      class="model-card-resize-handle"
+                      title="拖拽调整所有多模型卡片宽度"
+                      @mousedown.stop.prevent="startCardResize($event)"
+                    ></div>
                   </div>
                 </div>
+                <button
+                  v-if="getFocusedModelIndex(index, msg) !== undefined"
+                  @click="navigateModel(index, msg, 1)"
+                  class="model-nav-btn model-nav-right"
+                  title="切换到下一个模型"
+                >
+                  <i class="fas fa-chevron-right"></i>
+                </button>
               </div>
             </div>
           </div>
@@ -279,7 +307,7 @@
 </template>
 
 <script setup>
-import { ref, watch, nextTick } from 'vue'
+import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { renderMarkdown } from '../utils/markdown'
 
@@ -322,6 +350,61 @@ function getModelDisplayName(modelMsg) {
   return fullName
 }
 
+function getModelFullName(modelMsg) {
+  return modelMsg?.model_info?.name || modelMsg?.model || ''
+}
+
+function getMessageModels(msg) {
+  return msg.models || msg.parallel_models || []
+}
+
+function getPreferredModelIndex(msg) {
+  const models = getMessageModels(msg)
+  if (models.length === 0) return undefined
+  
+  const defaultModel = multiModelPreferences.value.defaultModel
+  if (defaultModel) {
+    const index = models.findIndex(modelMsg => getModelFullName(modelMsg) === defaultModel)
+    if (index >= 0) return index
+  }
+  
+  return 0
+}
+
+function getFocusedModelIndex(messageIndex, msg) {
+  if (Object.prototype.hasOwnProperty.call(fullscreenModelIndex.value, messageIndex)) {
+    const value = fullscreenModelIndex.value[messageIndex]
+    return value === null ? undefined : value
+  }
+  
+  if (multiModelPreferences.value.displayMode === 'focused') {
+    return getPreferredModelIndex(msg)
+  }
+  
+  return undefined
+}
+
+function getModelCardStyle(messageIndex, msg) {
+  const width = Number(multiModelPreferences.value.cardWidth)
+  const focused = getFocusedModelIndex(messageIndex, msg) !== undefined
+  
+  if (!width && focused) {
+    return {
+      flex: '0 1 auto',
+      width: '860px',
+      maxWidth: '100%'
+    }
+  }
+  
+  if (!width) return {}
+  
+  return {
+    flex: focused ? '0 1 auto' : `0 0 ${width}px`,
+    width: `${width}px`,
+    maxWidth: focused ? '100%' : undefined
+  }
+}
+
 const container = ref(null)
 const editTextarea = ref(null)
 
@@ -333,8 +416,54 @@ const editingContent = ref('')
 const isSelectionMode = ref(false)
 const selectedIndices = ref(new Set())
 
-// 全屏模式相关 - 记录每个消息的全屏模型索引
+const MULTI_MODEL_PREFERENCES_KEY = 'multiModelDisplayPreferences'
+const DEFAULT_MULTI_MODEL_PREFERENCES = {
+  displayMode: 'parallel',
+  defaultModel: '',
+  cardWidth: 0
+}
+
+const multiModelPreferences = ref({ ...DEFAULT_MULTI_MODEL_PREFERENCES })
+
+// 聚焦模式相关 - 记录每个消息的聚焦模型索引，null 表示本条消息临时显示全部
 const fullscreenModelIndex = ref({})
+const activeFocusedMessageIndex = ref(null)
+const resizeState = ref(null)
+
+function loadMultiModelPreferences() {
+  try {
+    const raw = localStorage.getItem(MULTI_MODEL_PREFERENCES_KEY)
+    if (!raw) {
+      multiModelPreferences.value = { ...DEFAULT_MULTI_MODEL_PREFERENCES }
+      return
+    }
+    multiModelPreferences.value = {
+      ...DEFAULT_MULTI_MODEL_PREFERENCES,
+      ...JSON.parse(raw)
+    }
+  } catch (error) {
+    console.warn('加载多模型显示偏好失败:', error)
+    multiModelPreferences.value = { ...DEFAULT_MULTI_MODEL_PREFERENCES }
+  }
+}
+
+function saveMultiModelPreferences() {
+  localStorage.setItem(MULTI_MODEL_PREFERENCES_KEY, JSON.stringify(multiModelPreferences.value))
+  window.dispatchEvent(new CustomEvent('multi-model-preferences-updated', {
+    detail: multiModelPreferences.value
+  }))
+}
+
+function handlePreferencesUpdated(event) {
+  if (event.detail) {
+    multiModelPreferences.value = {
+      ...DEFAULT_MULTI_MODEL_PREFERENCES,
+      ...event.detail
+    }
+  } else {
+    loadMultiModelPreferences()
+  }
+}
 
 // 监听消息数量变化，如果消息为空，自动退出选择模式
 watch(() => props.messages.length, (newCount) => {
@@ -600,26 +729,138 @@ async function handleRegenerateFromEdit(index, message) {
   startEdit(index, message.content)
 }
 
-// 全屏模式相关函数
-function toggleModelView(messageIndex, modelIndex) {
-  if (fullscreenModelIndex.value[messageIndex] === modelIndex) {
-    // 如果点击的是当前全屏的模型，则退出全屏
-    exitFullscreen(messageIndex)
+function toggleModelView(messageIndex, msg, modelIndex) {
+  if (getFocusedModelIndex(messageIndex, msg) === modelIndex) {
+    exitFocused(messageIndex)
   } else {
-    // 否则进入该模型的全屏
-    enterFullscreen(messageIndex, modelIndex)
+    enterFocused(messageIndex, msg, modelIndex)
   }
 }
 
-function enterFullscreen(messageIndex, modelIndex) {
+function enterFocused(messageIndex, msg, modelIndex) {
+  const models = getMessageModels(msg)
+  const modelName = getModelFullName(models[modelIndex])
+  
   fullscreenModelIndex.value[messageIndex] = modelIndex
+  fullscreenModelIndex.value = { ...fullscreenModelIndex.value }
+  activeFocusedMessageIndex.value = messageIndex
+  
+  if (modelName) {
+    multiModelPreferences.value.defaultModel = modelName
+    saveMultiModelPreferences()
+  }
 }
 
-function exitFullscreen(messageIndex) {
-  delete fullscreenModelIndex.value[messageIndex]
-  // 触发响应式更新
+function exitFocused(messageIndex) {
+  fullscreenModelIndex.value[messageIndex] = null
   fullscreenModelIndex.value = { ...fullscreenModelIndex.value }
+  if (activeFocusedMessageIndex.value === messageIndex) {
+    activeFocusedMessageIndex.value = null
+  }
 }
+
+function navigateModel(messageIndex, msg, direction) {
+  const models = getMessageModels(msg)
+  if (models.length === 0) return
+  
+  const currentIndex = getFocusedModelIndex(messageIndex, msg) ?? getPreferredModelIndex(msg) ?? 0
+  const nextIndex = (currentIndex + direction + models.length) % models.length
+  enterFocused(messageIndex, msg, nextIndex)
+}
+
+function setActiveFocusedMessage(messageIndex, msg) {
+  if (getFocusedModelIndex(messageIndex, msg) !== undefined) {
+    activeFocusedMessageIndex.value = messageIndex
+  }
+}
+
+function isEditableTarget(target) {
+  if (!target) return false
+  const tagName = target.tagName?.toLowerCase()
+  return tagName === 'input' || tagName === 'textarea' || target.isContentEditable
+}
+
+function findKeyboardTargetMessageIndex() {
+  const activeIndex = activeFocusedMessageIndex.value
+  if (
+    activeIndex !== null
+    && props.messages[activeIndex]
+    && getFocusedModelIndex(activeIndex, props.messages[activeIndex]) !== undefined
+  ) {
+    return activeIndex
+  }
+  
+  for (let index = props.messages.length - 1; index >= 0; index--) {
+    const msg = props.messages[index]
+    if (
+      msg?.role !== 'user'
+      && (msg?.is_multi_model || msg?.type === 'multi_model' || msg?.parallel_models)
+      && getFocusedModelIndex(index, msg) !== undefined
+    ) {
+      return index
+    }
+  }
+  
+  return null
+}
+
+function handleModelKeyboardNavigation(event) {
+  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+  if (isEditableTarget(event.target)) return
+  
+  const messageIndex = findKeyboardTargetMessageIndex()
+  if (messageIndex === null) return
+  
+  const msg = props.messages[messageIndex]
+  event.preventDefault()
+  navigateModel(messageIndex, msg, event.key === 'ArrowLeft' ? -1 : 1)
+}
+
+function startCardResize(event) {
+  const card = event.currentTarget.closest('.model-message-card')
+  const currentWidth = Number(multiModelPreferences.value.cardWidth) || card?.getBoundingClientRect().width || 420
+  const isFocused = card?.classList.contains('fullscreen-card')
+  
+  resizeState.value = {
+    startX: event.clientX,
+    startWidth: currentWidth,
+    factor: isFocused ? 2 : 1
+  }
+  document.body.classList.add('resizing-model-card')
+}
+
+function handleCardResize(event) {
+  if (!resizeState.value) return
+  
+  const delta = (event.clientX - resizeState.value.startX) * resizeState.value.factor
+  const maxWidth = Math.max(320, Math.min(window.innerWidth - 160, 1400))
+  const width = Math.round(Math.min(Math.max(resizeState.value.startWidth + delta, 320), maxWidth))
+  multiModelPreferences.value.cardWidth = width
+}
+
+function stopCardResize() {
+  if (!resizeState.value) return
+  
+  resizeState.value = null
+  document.body.classList.remove('resizing-model-card')
+  saveMultiModelPreferences()
+}
+
+onMounted(() => {
+  loadMultiModelPreferences()
+  window.addEventListener('multi-model-preferences-updated', handlePreferencesUpdated)
+  window.addEventListener('mousemove', handleCardResize)
+  window.addEventListener('mouseup', stopCardResize)
+  window.addEventListener('keydown', handleModelKeyboardNavigation)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('multi-model-preferences-updated', handlePreferencesUpdated)
+  window.removeEventListener('mousemove', handleCardResize)
+  window.removeEventListener('mouseup', stopCardResize)
+  window.removeEventListener('keydown', handleModelKeyboardNavigation)
+  document.body.classList.remove('resizing-model-card')
+})
 
 defineExpose({
   scrollToBottom
@@ -865,9 +1106,71 @@ defineExpose({
   align-items: stretch;
 }
 
+.model-view-wrapper {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  width: 100%;
+}
+
+.model-view-wrapper.focused-mode {
+  align-items: stretch;
+}
+
+.model-view-wrapper.focused-mode .model-cards-container {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  justify-content: center;
+}
+
 /* 全屏模式 - 垂直布局 */
 .model-cards-container.fullscreen-mode {
   flex-direction: column;
+  align-items: center;
+}
+
+.model-nav-btn {
+  flex: 1 1 0;
+  min-width: 40px;
+  border: 0;
+  border-radius: 16px;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+  transition: all 0.2s ease;
+  box-shadow: none;
+  font-size: 0;
+}
+
+.model-nav-btn:hover {
+  color: #2563eb;
+  background: rgba(239, 246, 255, 0.55);
+}
+
+.model-nav-btn i {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  transition: all 0.2s ease;
+}
+
+.model-nav-btn:hover i {
+  border-color: #93c5fd;
+  background: #eff6ff;
+  box-shadow: 0 6px 16px rgba(37, 99, 235, 0.16);
+  transform: scale(1.04);
 }
 
 /* 模型选择按钮组 */
@@ -952,19 +1255,61 @@ defineExpose({
   padding: 10px 0px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
   position: relative;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  overflow: hidden;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+  overflow: visible;
+}
+
+.model-card-resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 16px;
+  height: 100%;
+  cursor: ew-resize;
+  z-index: 12;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.model-card-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 18px;
+  right: 6px;
+  width: 4px;
+  height: calc(100% - 36px);
+  border-radius: 999px;
+  background: #60a5fa;
+}
+
+.model-message-card:hover .model-card-resize-handle {
+  opacity: 0.5;
+}
+
+.model-card-resize-handle:hover {
+  opacity: 1 !important;
+}
+
+:global(body.resizing-model-card) {
+  cursor: ew-resize;
+  user-select: none;
+}
+
+:global(body.resizing-model-card) .model-message-card {
+  transition: none !important;
+  transform: none !important;
+}
+
+:global(body.resizing-model-card) .model-card-resize-handle {
+  opacity: 1 !important;
 }
 
 .model-message-card:hover {
   box-shadow: 0 8px 16px rgba(0, 0, 0, 0.08), 0 4px 8px rgba(0, 0, 0, 0.04);
-  transform: translateY(-3px);
   border-color: #cbd5e0;
 }
 
 .model-message-card.fullscreen-card {
-  flex: 1 1 100%;
-  max-width: 100%;
   box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1), 0 6px 12px rgba(0, 0, 0, 0.06);
   border: 1px solid #cbd5e0;
 }

@@ -1074,7 +1074,7 @@ function handleKeyDown(event) {
   const ctrlMatch = hotkey.ctrl ? event.ctrlKey : !event.ctrlKey
   const altMatch = hotkey.alt ? event.altKey : !event.altKey
   const shiftMatch = hotkey.shift ? event.shiftKey : !event.shiftKey
-  const keyMatch = event.key.toLowerCase() === hotkey.key
+  const keyMatch = (event.key || '').toLowerCase() === hotkey.key
   
   if (ctrlMatch && altMatch && shiftMatch && keyMatch) {
     event.preventDefault() // 阻止浏览器默认行为（包括刷新）

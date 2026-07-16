@@ -67,8 +67,17 @@ class VoiceRecognizer:
         self.ve_cluster: str = VOLCENGINE_CONFIG['cluster']
         
         self.logger.info("初始化语音识别服务:")
-        self.logger.info(f"  主要: 字节跳动 ASR (app_key={self.bd_app_key})")
-        self.logger.info(f"  备用: 火山引擎 ASR (appid={self.ve_appid}, cluster={self.ve_cluster})")
+        self.logger.info(
+            f"  主要: 字节跳动 ASR "
+            f"(app_key={'SET' if self.bd_app_key else 'EMPTY'}, "
+            f"access_key={'SET' if self.bd_access_key else 'EMPTY'})"
+        )
+        self.logger.info(
+            f"  备用: 火山引擎 ASR "
+            f"(appid={'SET' if self.ve_appid else 'EMPTY'}, "
+            f"token={'SET' if self.ve_token else 'EMPTY'}, "
+            f"cluster={self.ve_cluster})"
+        )
     
     async def recognize_with_bytedance(self, audio_file: str) -> Tuple[Optional[str], Optional[str]]:
         """

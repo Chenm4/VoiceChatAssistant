@@ -2,6 +2,8 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { fileURLToPath, URL } from 'node:url'
 
+const FRONTEND_PORT = Number(process.env.FRONTEND_PORT || 5188)
+
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [vue()],
@@ -11,7 +13,9 @@ export default defineConfig({
     }
   },
   server: {
-    port: 5173,
+    host: '0.0.0.0',
+    port: FRONTEND_PORT,
+    strictPort: true,
     proxy: {
       '/api': {
         target: 'http://localhost:8888',

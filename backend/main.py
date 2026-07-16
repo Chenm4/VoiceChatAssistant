@@ -2,6 +2,7 @@
 FastAPI 主应用
 """
 
+import os
 import sys
 from pathlib import Path
 from fastapi import FastAPI
@@ -16,6 +17,17 @@ from backend.utils.logger import get_app_logger
 
 # 初始化日志
 logger = get_app_logger()
+FRONTEND_PORT = os.getenv("FRONTEND_PORT", "5188")
+FRONTEND_ORIGINS = [
+    f"http://localhost:{FRONTEND_PORT}",
+    f"http://127.0.0.1:{FRONTEND_PORT}",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+]
 
 # 创建 FastAPI 应用
 app = FastAPI(
@@ -27,7 +39,7 @@ app = FastAPI(
 # CORS 配置
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://localhost:8080"],
+    allow_origins=FRONTEND_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -50,6 +62,7 @@ async def startup_event():
     logger.info("🚀 ChatGPT Web 应用启动")
     logger.info("="*60)
     logger.info("📡 API 端点: http://localhost:8888/api")
+    logger.info(f"📱 前端开发地址: http://localhost:{FRONTEND_PORT}")
     logger.info("📚 API 文档: http://localhost:8888/docs")
     logger.info("📖 ReDoc: http://localhost:8888/redoc")
     logger.info("="*60)
@@ -69,9 +82,9 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     logger.info("启动 Uvicorn 服务器...")
-    
+
     uvicorn.run(
         "backend.main:app",
         host="0.0.0.0",

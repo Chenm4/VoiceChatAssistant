@@ -1,5 +1,12 @@
 #!/bin/bash
 
+FRONTEND_PORT=${FRONTEND_PORT:-5188}
+PYTHON_BIN=${PYTHON_BIN:-python3}
+
+if [ -x ".venv/bin/python" ]; then
+    PYTHON_BIN="$(pwd)/.venv/bin/python"
+fi
+
 echo "🚀 启动 ChatGPT Web 应用"
 echo "================================"
 echo ""
@@ -10,12 +17,24 @@ if [ ! -d "frontend" ] || [ ! -d "backend" ]; then
     exit 1
 fi
 
+if [ -f ".env" ]; then
+    echo "🔐 加载本地环境变量: .env"
+    set -a
+    source .env
+    set +a
+fi
+
+if [ -f ".env.local" ]; then
+    echo "🔐 加载本地环境变量: .env.local"
+    set -a
+    source .env.local
+    set +a
+fi
+
 # 启动后端
 echo "📡 启动后端服务..."
-cd backend
-python3 main.py &
+$PYTHON_BIN -m uvicorn backend.main:app --host 0.0.0.0 --port 8888 &
 BACKEND_PID=$!
-cd ..
 
 # 等待后端启动
 echo "⏳ 等待后端启动..."
@@ -41,7 +60,7 @@ if [ ! -d "node_modules" ]; then
     npm install
 fi
 
-npm run dev &
+FRONTEND_PORT=$FRONTEND_PORT npm run dev -- --host 0.0.0.0 --port $FRONTEND_PORT &
 FRONTEND_PID=$!
 cd ..
 
@@ -50,7 +69,7 @@ echo "================================"
 echo "✅ 应用启动成功！"
 echo "================================"
 echo ""
-echo "📱 前端地址: http://localhost:5173"
+echo "📱 前端地址: http://localhost:$FRONTEND_PORT"
 echo "📡 后端地址: http://localhost:8888"
 echo "📚 API 文档: http://localhost:8888/docs"
 echo ""

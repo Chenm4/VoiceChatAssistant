@@ -148,6 +148,22 @@ api_config = ConfigModel(
     base_url=default_source.base_url
 )
 
+
+def get_chat_completion_extra_params(source: Optional[ConfigSource], model: str) -> Dict[str, Any]:
+    """Return provider-specific Chat Completions options."""
+    source_name = (source.name if source else "").lower()
+    base_url = (source.base_url if source else api_config.base_url).lower()
+    model_name = (model or "").lower()
+    
+    if (
+        source_name == "qwen"
+        or "dashscope.aliyuncs.com" in base_url
+        or model_name.startswith("qwen")
+    ):
+        return {"extra_body": {"enable_thinking": False}}
+    
+    return {}
+
 # ==================== 会话管理全局状态 ====================
 # 使用新的存储架构：按月分组存储，索引与内容分离
 current_session_id: str = None  # 当前活动的会话 ID
@@ -644,12 +660,6 @@ async def stop_recording():
 @router.post("/chat")
 async def chat(request: ChatRequest):
     """发送消息（流式返回）- 支持树形对话和并行响应"""
-    global openai_client
-    
-    if not openai_client:
-        logger.error("OpenAI 客户端未初始化")
-        raise HTTPException(status_code=400, detail="请先配置 API Key")
-    
     if not request.message:
         raise HTTPException(status_code=400, detail="消息不能为空")
     
@@ -657,6 +667,24 @@ async def chat(request: ChatRequest):
     
     # 获取当前会话
     current_session = get_current_session()
+    session_config = current_session.session_config
+    
+    if session_config and session_config.models and len(session_config.models) > 0:
+        models_to_use = session_config.models
+        source_name = session_config.source_name or current_config.current_source
+        source_to_use = next((s for s in config_sources if s.name == source_name), None)
+    else:
+        models_to_use = [api_config.model]
+        source_name = current_config.current_source
+        source_to_use = next((s for s in config_sources if s.name == source_name), None)
+    
+    if not source_to_use:
+        logger.error(f"配置源不存在: source={source_name}, models={models_to_use}")
+        raise HTTPException(status_code=400, detail=f"配置源 {source_name} 不存在")
+    
+    if not source_to_use.api_key:
+        logger.error(f"API Key 未配置: source={source_to_use.name}, models={models_to_use}")
+        raise HTTPException(status_code=400, detail=f"请先配置 {source_to_use.name} 的 API Key")
     
     # 生成用户消息 ID
     import uuid
@@ -750,22 +778,6 @@ async def chat(request: ChatRequest):
         import asyncio
         try:
             logger.info(f"📝 会话总消息数: {len(current_session.messages)}")
-            
-            # 检查会话配置，确定要使用的模型列表
-            session_config = current_session.session_config
-            models_to_use = []
-            source_to_use = None
-            
-            if session_config and session_config.models and len(session_config.models) > 0:
-                # 使用会话配置的模型
-                models_to_use = session_config.models
-                source_name = session_config.source_name or current_config.current_source
-                source_to_use = next((s for s in config_sources if s.name == source_name), None)
-            else:
-                # 使用全局配置
-                models_to_use = [api_config.model]
-                source_to_use = next((s for s in config_sources if s.name == current_config.current_source), None)
-            
             is_parallel = len(models_to_use) > 1
             logger.info(f"🚀 开始流式调用: models={models_to_use}, parallel={is_parallel}, session={current_session_id}")
             
@@ -817,13 +829,16 @@ async def chat(request: ChatRequest):
                             messages=model_messages,
                             temperature=session_config.temperature if session_config else 0.7,
                             top_p=session_config.top_p if session_config else 1.0,
-                            stream=True
+                            stream=True,
+                            **get_chat_completion_extra_params(source_to_use, model_name)
                         )
                         
                         chunk_count = 0
                         async for chunk in stream:
-                            if chunk.choices[0].delta.content:
-                                content = chunk.choices[0].delta.content
+                            if not chunk.choices:
+                                continue
+                            content = chunk.choices[0].delta.content
+                            if content:
                                 model_results[model_index]['content'] += content
                                 chunk_count += 1
                                 
@@ -959,13 +974,19 @@ async def chat(request: ChatRequest):
                 model_messages = build_messages_for_model(model_to_use)
                 logger.info(f"🔧 模型 {model_to_use} 的消息历史: {len(model_messages)} 条")
                 
+                client = OpenAI(
+                    api_key=source_to_use.api_key,
+                    base_url=source_to_use.base_url
+                )
+                
                 # 调用 OpenAI API（流式）
-                stream = openai_client.chat.completions.create(
+                stream = client.chat.completions.create(
                     model=model_to_use,
                     messages=model_messages,
                     temperature=session_config.temperature if session_config else 0.7,
                     top_p=session_config.top_p if session_config else 1.0,
-                    stream=True
+                    stream=True,
+                    **get_chat_completion_extra_params(source_to_use, model_to_use)
                 )
                 
                 assistant_message = ''
@@ -973,8 +994,10 @@ async def chat(request: ChatRequest):
                 last_log_time = time.time()
                 
                 for chunk in stream:
-                    if chunk.choices[0].delta.content:
-                        content = chunk.choices[0].delta.content
+                    if not chunk.choices:
+                        continue
+                    content = chunk.choices[0].delta.content
+                    if content:
                         assistant_message += content
                         chunk_count += 1
                         
@@ -1723,12 +1746,6 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
         - type: 'done' - 完成
         - type: 'error' - 错误
     """
-    global openai_client
-    
-    if not openai_client:
-        logger.error("OpenAI 客户端未初始化")
-        raise HTTPException(status_code=400, detail="请先配置 API Key")
-    
     logger.info(f"重新生成消息: session={session_id}, message_id={message_id}")
     
     # 加载会话
@@ -1750,6 +1767,28 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
     
     if target_message.role != "user":
         raise HTTPException(status_code=400, detail="只能重新生成用户消息的响应")
+    
+    session_config = session.session_config
+    if request.model:
+        models_to_use = [request.model]
+        source_to_use = next((s for s in config_sources if request.model in s.models), None)
+        source_name = source_to_use.name if source_to_use else None
+    elif session_config and session_config.models and len(session_config.models) > 0:
+        models_to_use = session_config.models
+        source_name = session_config.source_name or current_config.current_source
+        source_to_use = next((s for s in config_sources if s.name == source_name), None)
+    else:
+        models_to_use = [api_config.model]
+        source_name = current_config.current_source
+        source_to_use = next((s for s in config_sources if s.name == source_name), None)
+    
+    if not source_to_use:
+        logger.error(f"配置源不存在: source={source_name}, models={models_to_use}")
+        raise HTTPException(status_code=400, detail=f"配置源 {source_name or '未知'} 不存在")
+    
+    if not source_to_use.api_key:
+        logger.error(f"API Key 未配置: source={source_to_use.name}, models={models_to_use}")
+        raise HTTPException(status_code=400, detail=f"请先配置 {source_to_use.name} 的 API Key")
     
     # 更新消息内容
     target_message.content = request.new_content
@@ -1852,30 +1891,6 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
         import uuid
         
         try:
-            
-            # 确定使用的模型
-            session_config = session.session_config
-            models_to_use = []
-            source_to_use = None
-            
-            if request.model:
-                # 使用请求中指定的模型
-                models_to_use = [request.model]
-                # 查找该模型所属的配置源
-                for source in config_sources:
-                    if request.model in source.models:
-                        source_to_use = source
-                        break
-            elif session_config and session_config.models and len(session_config.models) > 0:
-                # 使用会话配置的模型
-                models_to_use = session_config.models
-                source_name = session_config.source_name or current_config.current_source
-                source_to_use = next((s for s in config_sources if s.name == source_name), None)
-            else:
-                # 使用全局配置
-                models_to_use = [api_config.model]
-                source_to_use = next((s for s in config_sources if s.name == current_config.current_source), None)
-            
             is_parallel = len(models_to_use) > 1
             logger.info(f"开始重新生成: models={models_to_use}, parallel={is_parallel}")
             
@@ -1920,13 +1935,16 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                             messages=model_messages,
                             temperature=session_config.temperature if session_config else 0.7,
                             top_p=session_config.top_p if session_config else 1.0,
-                            stream=True
+                            stream=True,
+                            **get_chat_completion_extra_params(source_to_use, model_name)
                         )
                         
                         chunk_count = 0
                         async for chunk in stream:
-                            if chunk.choices[0].delta.content:
-                                content = chunk.choices[0].delta.content
+                            if not chunk.choices:
+                                continue
+                            content = chunk.choices[0].delta.content
+                            if content:
                                 model_results[model_index]['content'] += content
                                 chunk_count += 1
                                 
@@ -2062,20 +2080,28 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                 model_messages = build_messages_for_model_regenerate(model_to_use)
                 logger.info(f"🔧 重新生成 - 模型 {model_to_use} 的消息历史: {len(model_messages)} 条")
                 
-                stream = openai_client.chat.completions.create(
+                client = OpenAI(
+                    api_key=source_to_use.api_key,
+                    base_url=source_to_use.base_url
+                )
+                
+                stream = client.chat.completions.create(
                     model=model_to_use,
                     messages=model_messages,
                     temperature=session_config.temperature if session_config else 0.7,
                     top_p=session_config.top_p if session_config else 1.0,
-                    stream=True
+                    stream=True,
+                    **get_chat_completion_extra_params(source_to_use, model_to_use)
                 )
                 
                 assistant_message = ''
                 chunk_count = 0
                 
                 for chunk in stream:
-                    if chunk.choices[0].delta.content:
-                        content = chunk.choices[0].delta.content
+                    if not chunk.choices:
+                        continue
+                    content = chunk.choices[0].delta.content
+                    if content:
                         assistant_message += content
                         chunk_count += 1
                         

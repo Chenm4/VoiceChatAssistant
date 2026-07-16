@@ -73,6 +73,33 @@
         </div>
       </div>
 
+      <div v-if="selectedModels.length > 1" class="section global-display-section">
+        <div class="label-with-tag">
+          <label class="label">多模型显示（全局）</label>
+          <el-tag size="small" type="success">所有会话生效</el-tag>
+        </div>
+        <el-radio-group v-model="multiModelDisplayMode" class="display-mode-group">
+          <el-radio-button label="parallel">并排显示</el-radio-button>
+          <el-radio-button label="focused">单模型切换</el-radio-button>
+        </el-radio-group>
+        <el-select 
+          v-model="defaultDisplayModel" 
+          placeholder="选择默认显示模型"
+          style="width: 100%"
+        >
+          <el-option
+            v-for="model in selectedModels"
+            :key="model"
+            :label="model"
+            :value="model"
+          />
+        </el-select>
+        <div class="display-hint">
+          <el-icon><InfoFilled /></el-icon>
+          并排卡片宽度在回答卡片右边缘拖拽调整，拖完会自动全局保存
+        </div>
+      </div>
+
       <div class="section">
         <label class="label">Temperature</label>
         <el-input-number
@@ -174,6 +201,14 @@ const topP = ref(1)
 const saving = ref(false)
 const systemPrompt = ref('')
 const selectedPromptTemplate = ref('')
+const MULTI_MODEL_PREFERENCES_KEY = 'multiModelDisplayPreferences'
+const DEFAULT_MULTI_MODEL_PREFERENCES = {
+  displayMode: 'parallel',
+  defaultModel: '',
+  cardWidth: 0
+}
+const multiModelDisplayMode = ref('parallel')
+const defaultDisplayModel = ref('')
 
 // 预设系统提示词模板
 const promptTemplates = ref([
@@ -241,8 +276,45 @@ const currentSourceModels = computed(() => {
   return source ? source.models : []
 })
 
+function loadMultiModelPreferences() {
+  try {
+    const raw = localStorage.getItem(MULTI_MODEL_PREFERENCES_KEY)
+    const preferences = raw ? JSON.parse(raw) : DEFAULT_MULTI_MODEL_PREFERENCES
+    multiModelDisplayMode.value = preferences.displayMode || DEFAULT_MULTI_MODEL_PREFERENCES.displayMode
+    defaultDisplayModel.value = preferences.defaultModel || ''
+  } catch (error) {
+    console.warn('加载多模型显示偏好失败:', error)
+    multiModelDisplayMode.value = DEFAULT_MULTI_MODEL_PREFERENCES.displayMode
+    defaultDisplayModel.value = ''
+  }
+}
+
+function saveMultiModelPreferences() {
+  let current = { ...DEFAULT_MULTI_MODEL_PREFERENCES }
+  try {
+    const raw = localStorage.getItem(MULTI_MODEL_PREFERENCES_KEY)
+    if (raw) {
+      current = { ...current, ...JSON.parse(raw) }
+    }
+  } catch (error) {
+    console.warn('读取多模型显示偏好失败，将使用默认值:', error)
+  }
+  
+  const next = {
+    ...current,
+    displayMode: multiModelDisplayMode.value,
+    defaultModel: defaultDisplayModel.value || selectedModels.value[0] || ''
+  }
+  
+  localStorage.setItem(MULTI_MODEL_PREFERENCES_KEY, JSON.stringify(next))
+  window.dispatchEvent(new CustomEvent('multi-model-preferences-updated', {
+    detail: next
+  }))
+}
+
 function initFromSession() {
   if (!props.session || !props.config) return
+  loadMultiModelPreferences()
   const sessionConfig = props.session.session_config
   if (sessionConfig) {
     selectedSource.value = sessionConfig.source_name || props.config.current_source
@@ -276,9 +348,19 @@ function initFromSession() {
     systemPrompt.value = ''
     selectedPromptTemplate.value = ''
   }
+  
+  if (selectedModels.value.length > 0 && !selectedModels.value.includes(defaultDisplayModel.value)) {
+    defaultDisplayModel.value = selectedModels.value[0]
+  }
 }
 
 watch(() => [props.session, props.config], initFromSession, { deep: true, immediate: true })
+
+watch(selectedModels, (models) => {
+  if (models.length > 0 && !models.includes(defaultDisplayModel.value)) {
+    defaultDisplayModel.value = models[0]
+  }
+}, { deep: true })
 
 function handleSourceChange() {
   const source = props.config.sources.find(s => s.name === selectedSource.value)
@@ -330,6 +412,7 @@ async function handleSave() {
     }
     const response = await api.put(`/sessions/${props.session.id}/config`, payload)
     if (response.success) {
+      saveMultiModelPreferences()
       ElMessage.success('会话配置已保存')
       emit('updated')
     }
@@ -347,6 +430,8 @@ function handleReset() {
   topP.value = 1
   systemPrompt.value = ''
   selectedPromptTemplate.value = ''
+  multiModelDisplayMode.value = DEFAULT_MULTI_MODEL_PREFERENCES.displayMode
+  defaultDisplayModel.value = selectedModels.value[0] || ''
 }
 </script>
 
@@ -467,6 +552,34 @@ function handleReset() {
 
 .model-tag-draggable:active .drag-handle {
   cursor: grabbing;
+}
+
+.global-display-section {
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: #eff6ff;
+}
+
+.display-mode-group {
+  width: 100%;
+}
+
+.display-mode-group :deep(.el-radio-button) {
+  width: 50%;
+}
+
+.display-mode-group :deep(.el-radio-button__inner) {
+  width: 100%;
+}
+
+.display-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #2563eb;
 }
 
 .actions {
