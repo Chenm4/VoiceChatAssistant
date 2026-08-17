@@ -24,8 +24,8 @@ import pyaudio
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from backend.utils.logger import get_asr_logger
-from backend.utils.sauc_client import AsrWsClient, RequestBuilder
-from config import AUDIO_CONFIG, BYTEDANCE_ASR_CONFIG
+from backend.services.volcengine_streaming import VolcengineStreamingClient
+from config import AUDIO_CONFIG, VOLCENGINE_CONFIG
 
 
 class StreamingASR:
@@ -71,7 +71,7 @@ class StreamingASR:
         self.audio_queue: Optional[asyncio.Queue] = None
         self.result_text: str = ""
         self.error_message: Optional[str] = None
-        self.ws_client: Optional[AsrWsClient] = None
+        self.ws_client: Optional[VolcengineStreamingClient] = None
         self.stream: Optional[pyaudio.Stream] = None
         self.p: Optional[pyaudio.PyAudio] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
@@ -88,9 +88,9 @@ class StreamingASR:
         self.CHANNELS: int = AUDIO_CONFIG['channels']
         self.RATE: int = AUDIO_CONFIG['rate']
         
-        # WebSocket 参数
-        self.url: str = BYTEDANCE_ASR_CONFIG['url']
-        self.segment_duration: int = BYTEDANCE_ASR_CONFIG.get('segment_duration', 200)
+        # WebSocket 参数（火山引擎 v2/asr 协议）
+        self.url: str = VOLCENGINE_CONFIG.get('ws_url', 'wss://openspeech.bytedance.com/api/v2/asr')
+        self.segment_duration: int = VOLCENGINE_CONFIG.get('segment_duration', 200)
         
         # 计算每个音频包的大小（字节数）
         # segment_duration (200ms) -> 每包需要多少帧
@@ -166,14 +166,20 @@ class StreamingASR:
             connect_start = time.time()
             self.logger.info("🔗 [建立连接] 正在连接到 ASR 服务（录音已开始）...")
             
-            self.ws_client = AsrWsClient(self.url, self.segment_duration)
+            self.ws_client = VolcengineStreamingClient(
+                appid=VOLCENGINE_CONFIG['appid'],
+                token=VOLCENGINE_CONFIG['token'],
+                cluster=VOLCENGINE_CONFIG['cluster'],
+                ws_url=self.url,
+                segment_duration=self.segment_duration
+            )
             self.logger.info(f"📝 [创建客户端] URL={self.url}, segment_duration={self.segment_duration}ms")
             
             await self.ws_client.__aenter__()  # 创建 session
             self.logger.info("✅ [Session创建] aiohttp session 已创建")
             
             await self.ws_client.create_connection()
-            self.logger.info(f"✅ [WebSocket连接] 连接对象: {self.ws_client.conn}")
+            self.logger.info(f"✅ [WebSocket连接] 连接对象: {self.ws_client.ws}")
             
             connect_elapsed = (time.time() - connect_start) * 1000
             self.logger.info(f"✅ [连接成功] 耗时: {connect_elapsed:.2f}ms")
@@ -318,16 +324,9 @@ class StreamingASR:
                 # None 表示录音结束
                 if audio_data is None:
                     self.logger.info("🏁 [发送循环] 收到结束标记，发送最后一个包（is_last=True）...")
-                    # 发送最后一个包（标记为 is_last=True），告诉服务器音频结束
-                    # 使用一个空的或最小的音频数据
-                    empty_audio = b'\x00\x00'  # 最小的音频数据
-                    request = RequestBuilder.new_audio_only_request(
-                        self.ws_client.seq,
-                        empty_audio,
-                        is_last=True  # 关键：标记为最后一个包
-                    )
-                    await self.ws_client.conn.send_bytes(request)
-                    self.logger.info(f"✅ [最后包已发送] seq={self.ws_client.seq}, is_last=True")
+                    # 发送空的结束包（NEG_SEQUENCE 标记），告诉服务器音频结束
+                    await self.ws_client.send_audio(b'\x00\x00', is_last=True)
+                    self.logger.info("✅ [最后包已发送] is_last=True")
                     break
                 
                 segment_count += 1
@@ -335,15 +334,7 @@ class StreamingASR:
                 segment_start = time.time()
                 
                 # 发送音频数据
-                is_last = False  # 正常的音频包不是最后一个
-                request = RequestBuilder.new_audio_only_request(
-                    self.ws_client.seq,
-                    audio_data,
-                    is_last=is_last
-                )
-                
-                await self.ws_client.conn.send_bytes(request)
-                self.ws_client.seq += 1
+                await self.ws_client.send_audio(audio_data, is_last=False)
                 
                 segment_elapsed = (time.time() - segment_start) * 1000
                 
@@ -357,6 +348,17 @@ class StreamingASR:
             self.logger.error(f"❌ [发送循环错误] {e}", exc_info=True)
             self.error_message = f"发送音频失败: {str(e)}"
     
+    def _extract_text(self, payload_msg) -> str:
+        """从 v2 协议响应 payload 中提取识别文本（result 可能是 list 或 dict）"""
+        if not payload_msg:
+            return ""
+        result = payload_msg.get('result')
+        if isinstance(result, list):
+            return result[0].get('text', '') if result else ""
+        if isinstance(result, dict):
+            return result.get('text', '')
+        return ""
+
     async def _receiver_loop(self):
         """接收循环：接收 ASR 响应"""
         self.logger.info("📥 [接收循环] 启动...")
@@ -367,14 +369,19 @@ class StreamingASR:
                 response_count += 1
                 
                 if response.code != 0:
+                    message = (response.payload_msg or {}).get('message', '')
                     self.logger.error(f"❌ [识别错误] code={response.code}, msg={response.payload_msg}")
-                    self.error_message = f"识别错误 (code={response.code})"
+                    if response.code == 1013:
+                        # 火山引擎 1013：VAD 未检测到有效语音（常见原因：麦克风权限/静音）
+                        self.error_message = "未检测到有效语音，请检查麦克风权限和音量（系统设置 → 隐私与安全性 → 麦克风）"
+                    else:
+                        self.error_message = f"识别错误 (code={response.code})" + (f": {message}" if message else "")
                     break
                 
-                if response.is_last_package and response.payload_msg:
-                    # 最后一个包包含完整识别结果
-                    result = response.payload_msg.get('result', {})
-                    self.result_text = result.get('text', '')
+                # 服务端按块返回结果：结束块已发送且收到的响应数达到发送块数时，
+                # 该响应即为最终结果（响应可能滞后于发送，不能以 is_last 为准）
+                if self.ws_client.finished and response_count >= self.ws_client.chunks_sent:
+                    self.result_text = self._extract_text(response.payload_msg)
                     
                     if self.result_text:
                         self.logger.info(f"✅ [识别成功] 文本: \"{self.result_text}\"")
@@ -386,8 +393,7 @@ class StreamingASR:
                 
                 # 中间结果（可选）
                 if response.payload_msg:
-                    result = response.payload_msg.get('result', {})
-                    partial_text = result.get('text', '')
+                    partial_text = self._extract_text(response.payload_msg)
                     if partial_text and response_count % 5 == 0:  # 每5个响应记录一次
                         self.logger.debug(f"📝 [部分结果] \"{partial_text}\"")
             
