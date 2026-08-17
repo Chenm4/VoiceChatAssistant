@@ -48,12 +48,6 @@ app.add_middleware(
 # 注册路由
 app.include_router(router, prefix="/api")
 
-# 挂载前端静态文件（生产环境）
-frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
-if frontend_dist.exists():
-    app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
-    logger.info(f"挂载前端静态文件: {frontend_dist}")
-
 
 @app.on_event("startup")
 async def startup_event():
@@ -78,6 +72,13 @@ async def shutdown_event():
 async def health_check():
     """健康检查端点"""
     return {"status": "ok", "message": "服务运行正常"}
+
+
+# 挂载前端静态文件（生产环境，放在所有路由之后，避免遮蔽 API 路由）
+frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
+if frontend_dist.exists():
+    app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
+    logger.info(f"挂载前端静态文件: {frontend_dist}")
 
 
 if __name__ == "__main__":
