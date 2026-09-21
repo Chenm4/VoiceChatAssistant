@@ -1,7 +1,13 @@
 <template>
   <div class="session-sidebar" :class="{ collapsed: isCollapsed }">
     <!-- 折叠按钮 - 细长按钮贴在右边缘 -->
-    <button @click="toggleCollapse" class="collapse-btn" :class="{ collapsed: isCollapsed }">
+    <button
+      @click="toggleCollapse"
+      class="collapse-btn"
+      :class="{ collapsed: isCollapsed }"
+      :title="isCollapsed ? '展开会话栏' : '收起会话栏'"
+      :aria-label="isCollapsed ? '展开会话栏' : '收起会话栏'"
+    >
       <i class="fas" :class="isCollapsed ? 'fa-chevron-right' : 'fa-chevron-left'"></i>
     </button>
 
@@ -207,7 +213,7 @@ function formatTime(timestamp) {
 .session-sidebar {
   width: 260px;
   height: 100vh;
-  background: #f8f9fa;
+  background: #f5f7fb;
   border-right: 1px solid #e5e7eb;
   display: flex;
   flex-direction: column;
@@ -217,7 +223,7 @@ function formatTime(timestamp) {
 }
 
 .session-sidebar.collapsed {
-  width: 60px;
+  width: 72px;
 }
 
 /* 折叠按钮 - 贴在右边缘的细长按钮 */
@@ -226,8 +232,8 @@ function formatTime(timestamp) {
   right: 0;
   top: 50%;
   transform: translateY(-50%);
-  width: 12px;
-  height: 60px;
+  width: 24px;
+  height: 64px;
   background: rgba(255, 255, 255, 0.9);
   border: 1px solid #e5e7eb;
   border-right: none;
@@ -237,14 +243,14 @@ function formatTime(timestamp) {
   align-items: center;
   justify-content: center;
   color: #6b7280;
-  font-size: 10px;
+  font-size: 11px;
   transition: all 0.2s;
   z-index: 10;
   box-shadow: -2px 0 4px rgba(0, 0, 0, 0.05);
 }
 
 .collapse-btn:hover {
-  width: 16px;
+  width: 28px;
   background: white;
   color: #3b82f6;
   box-shadow: -2px 0 8px rgba(0, 0, 0, 0.1);
@@ -260,7 +266,7 @@ function formatTime(timestamp) {
 }
 
 .collapse-btn.collapsed:hover {
-  width: 16px;
+  width: 28px;
   box-shadow: 2px 0 8px rgba(0, 0, 0, 0.1);
 }
 
@@ -382,12 +388,18 @@ function formatTime(timestamp) {
 }
 
 .collapsed-actions {
-  padding: 16px 12px;
+  padding: 20px 14px;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 12px;
   flex: 1;
+}
+
+.collapsed-actions :deep(.el-button) {
+  width: 42px;
+  height: 42px;
+  margin: 0;
 }
 
 /* 滚动条样式 */

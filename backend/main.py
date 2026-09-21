@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 sys.path.append(str(Path(__file__).parent.parent))
 
 from backend.api.routes import router
+from prompt_lab.router import router as prompt_lab_router
 from backend.utils.logger import get_app_logger
 
 # 初始化日志
@@ -47,6 +48,7 @@ app.add_middleware(
 
 # 注册路由
 app.include_router(router, prefix="/api")
+app.include_router(prompt_lab_router, prefix="/api")
 
 
 @app.on_event("startup")

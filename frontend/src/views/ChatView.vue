@@ -16,16 +16,26 @@
       <!-- 顶部导航栏 -->
       <NavBar 
         :config="config"
+        @open-prompt-lab="$emit('open-prompt-lab')"
         @open-session-settings="showSessionSettings = true" 
         @clear-chat="handleClearChat" 
       />
       
+      <!-- 输入区域 -->
+      <InputArea
+        v-model="inputMessage"
+        :is-sending="isSending"
+        @send="handleSendMessage"
+      />
+
       <!-- 主聊天区域 -->
       <div class="chat-main">
         <MessageList 
           :messages="messages"
           :is-typing="isTyping"
           :current-session-id="currentSessionId"
+          :font-size="messageDisplaySettings.fontSize"
+          :line-height="messageDisplaySettings.lineHeight"
           ref="messageListRef"
           @message-updated="handleMessageUpdated"
           @message-deleted="handleMessageDeleted"
@@ -33,13 +43,6 @@
           @regenerate="handleRegenerateMessage"
         />
       </div>
-      
-      <!-- 输入区域 -->
-      <InputArea 
-        v-model="inputMessage"
-        :is-sending="isSending"
-        @send="handleSendMessage"
-      />
       
       <!-- 可拖动的语音按钮 -->
       <VoiceButton
@@ -80,6 +83,8 @@ import SessionSidebar from '../components/SessionSidebar.vue'
 import SessionSettingsSidebar from '../components/SessionSettingsSidebar.vue'
 import api from '../utils/api'
 
+defineEmits(['open-prompt-lab'])
+
 // 状态
 const messages = ref([])
 const inputMessage = ref('')
@@ -99,6 +104,11 @@ const currentSessionId = ref(null)
 const currentSession = computed(() => {
   return sessions.value.find(s => s.id === currentSessionId.value) || null
 })
+
+const messageDisplaySettings = computed(() => ({
+  fontSize: currentSession.value?.session_config?.display_font_size ?? 16,
+  lineHeight: currentSession.value?.session_config?.display_line_height ?? 1.7
+}))
 
 // 配置（从后端 config.py 读取）
 const config = ref({
@@ -456,6 +466,13 @@ let recordingStatusInterval = null
 async function checkRecordingStatus() {
   try {
     const status = await api.get('/recording/status')
+
+    // Soniox returns interim hypotheses during the stream. Reflect the latest
+    // hypothesis in the composer while recording; the stop endpoint still
+    // supplies the authoritative final text.
+    if (isRecording.value && status.partial_text) {
+      inputMessage.value = status.partial_text
+    }
     
     // 如果后端显示已自动停止，但前端还显示在录音
     if (status.auto_stopped && isRecording.value) {
@@ -487,7 +504,7 @@ async function checkRecordingStatus() {
 }
 
 // 停止录音并获取结果（独立函数，供自动停止和手动停止调用）
-async function handleStopRecording() {
+async function handleStopRecording({ sendMessage = true } = {}) {
   const stopClickTime = Date.now()
   console.log(`🔴 [停止录音:${new Date(Date.now()).toLocaleTimeString()}.${Date.now() % 1000}] 停止录音: ${new Date(stopClickTime).toLocaleTimeString()}.${stopClickTime % 1000}`)
   
@@ -525,6 +542,14 @@ async function handleStopRecording() {
       if (targetSessionId && targetSessionId !== currentSessionId.value) {
         console.log(`🔄 [会话切换] 录音期间会话已切换，发送到原始会话: ${targetSessionId}`)
         await handleSwitchSession(targetSessionId)
+        // 切换会话会重新加载消息，但不会保留输入框草稿。
+        inputMessage.value = data.text
+      }
+
+      if (!sendMessage) {
+        console.log('📝 [保留草稿] Esc 停止识别，结果保留在输入框且不发送')
+        showNotification('识别已停止，文字已保留在输入框，可修改后再发送', 'success', 4000)
+        return
       }
       
       console.log(`🚀 [发送消息:${new Date(Date.now()).toLocaleTimeString()}.${Date.now() % 1000}] 准备发送消息给模型...`)
@@ -582,10 +607,10 @@ async function handleStartRecording() {
       isRecording.value = true
       recordingSessionId = currentSessionId.value  // 记录开始录音时的会话ID
       console.log(`📝 [记录会话] 录音开始于会话: ${recordingSessionId}`)
-      showNotification('🎤 正在录音，请清晰地说话...', 'info')
+      showNotification('🎤 正在录音：Alt+E 停止并发送，Esc 停止并保留草稿', 'info', 5000)
       
-      // 启动状态轮询（每2秒检查一次）
-      recordingStatusInterval = setInterval(checkRecordingStatus, 2000)
+      // 以较短间隔同步 Soniox 的中间 token（停止接口仍返回最终文本）
+      recordingStatusInterval = setInterval(checkRecordingStatus, 500)
     } else {
       console.error(`❌ [启动失败] 后端返回失败: ${response.message}`)
       showNotification('启动录音失败: ' + (response.message || '未知错误'), 'error')
@@ -609,7 +634,7 @@ async function handleToggleRecording() {
   try {
     if (isRecording.value) {
       // 停止录音
-      await handleStopRecording()
+      await handleStopRecording({ sendMessage: true })
     } else {
       // 开始录音
       await handleStartRecording()
@@ -1066,19 +1091,48 @@ function parseHotkey(hotkeyStr) {
 
 // 键盘事件处理
 function handleKeyDown(event) {
+  // 录音过程中按 Esc：停止并保留识别文本，但不发送给模型。
+  // 非录音状态下不拦截 Esc，保留关闭弹窗等默认交互。
+  if (event.key === 'Escape' && isRecording.value) {
+    event.preventDefault()
+    event.stopPropagation()
+    if (event.repeat || isProcessingRecording) return
+
+    isProcessingRecording = true
+    handleStopRecording({ sendMessage: false })
+      .catch(error => {
+        console.error('Esc 停止识别失败:', error)
+      })
+      .finally(() => {
+        isProcessingRecording = false
+      })
+    return
+  }
+
   // 从配置中读取快捷键设置
-  const hotkeyConfig = config.value.hotkey?.local_toggle || 'ctrl+r'
+  const hotkeyConfig = config.value.hotkey?.local_toggle || 'alt+e'
   const hotkey = parseHotkey(hotkeyConfig)
   
   // 检查是否匹配配置的快捷键
   const ctrlMatch = hotkey.ctrl ? event.ctrlKey : !event.ctrlKey
   const altMatch = hotkey.alt ? event.altKey : !event.altKey
   const shiftMatch = hotkey.shift ? event.shiftKey : !event.shiftKey
-  const keyMatch = (event.key || '').toLowerCase() === hotkey.key
+  const eventKey = (event.key || '').toLowerCase()
+  const eventCode = (event.code || '').toLowerCase()
+  let expectedCode = ''
+  if (/^[a-z]$/.test(hotkey.key)) {
+    expectedCode = `key${hotkey.key}`
+  } else if (/^[0-9]$/.test(hotkey.key)) {
+    expectedCode = `digit${hotkey.key}`
+  }
+  // macOS 的 Option+E 是重音符死键，event.key 会变成 "Dead"；
+  // 同时检查物理键码 KeyE，确保 Alt+E 仍能正常触发。
+  const keyMatch = eventKey === hotkey.key || (expectedCode && eventCode === expectedCode)
   
   if (ctrlMatch && altMatch && shiftMatch && keyMatch) {
     event.preventDefault() // 阻止浏览器默认行为（包括刷新）
     event.stopPropagation() // 阻止事件冒泡
+    if (event.repeat) return
     handleToggleRecording()
   }
 }
@@ -1142,7 +1196,7 @@ onMounted(async () => {
   // 显示快捷键提示（仅首次）
   const hasSeenHotkeyTip = localStorage.getItem('hasSeenHotkeyTip')
   if (!hasSeenHotkeyTip) {
-    const hotkeyConfig = config.value.hotkey?.local_toggle || 'ctrl+r'
+    const hotkeyConfig = config.value.hotkey?.local_toggle || 'alt+e'
     const hotkeyDisplay = hotkeyConfig.split('+').map(k => 
       k.charAt(0).toUpperCase() + k.slice(1)
     ).join('+')
@@ -1186,6 +1240,7 @@ onUnmounted(() => {
 
 .chat-view {
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   height: 100vh;
@@ -1198,6 +1253,8 @@ onUnmounted(() => {
   overflow-y: auto;
   overflow-x: hidden;
   width: 100%;
+  min-width: 0;
+  background: #f7f9fc;
 }
 
 @keyframes fadeIn {

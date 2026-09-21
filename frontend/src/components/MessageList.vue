@@ -1,5 +1,11 @@
 <template>
-  <div class="message-list-wrapper">
+  <div
+    class="message-list-wrapper"
+    :style="{
+      '--message-font-size': `${fontSize}px`,
+      '--message-line-height': lineHeight
+    }"
+  >
     <!-- 顶部工具栏 -->
     <div v-if="messages.length > 0 && isSelectionMode" class="toolbar">
       <div class="toolbar-left">
@@ -37,7 +43,7 @@
       <div v-if="messages.length === 0" class="text-center py-12">
         <i class="fas fa-comments text-6xl text-gray-300 mb-4"></i>
         <h2 class="text-2xl font-semibold text-gray-700 mb-2">开始新对话</h2>
-        <p class="text-gray-500">在下方输入消息，或点击右下角的麦克风按钮开始语音输入</p>
+        <p class="text-gray-500">在上方输入消息，或点击右下角的麦克风按钮开始语音输入</p>
         <div class="mt-6 text-sm text-gray-400">
           <p>✨ 支持 Markdown 格式渲染</p>
           <p>🎨 代码高亮显示</p>
@@ -105,7 +111,7 @@
                 </div>
               </div>
               <div class="avatar user-avatar">
-                <i class="fas fa-user"></i>
+                <span class="avatar-label">我</span>
               </div>
             </div>
             <div v-if="isSelectionMode" class="checkbox-wrapper">
@@ -123,7 +129,7 @@
           <!-- 多模型并行消息 - 横向排列（流式中 is_multi_model 或已保存的 type='multi_model'）-->
           <div v-if="msg.is_multi_model || msg.type === 'multi_model' || msg.parallel_models" class="multi-model-container">
             <div class="avatar assistant-avatar">
-              <i class="fas fa-robot"></i>
+              <span class="avatar-label">答</span>
             </div>
             <div class="multi-model-messages">
               <!-- 模型选择按钮组 -->
@@ -237,7 +243,7 @@
             </div>
             <div class="message-content-wrapper">
               <div class="avatar assistant-avatar">
-                <i class="fas fa-robot"></i>
+                <span class="avatar-label">答</span>
               </div>
               <div class="message-bubble assistant-bubble">
                 <!-- 模型标识 -->
@@ -323,6 +329,14 @@ const props = defineProps({
   currentSessionId: {
     type: String,
     default: null
+  },
+  fontSize: {
+    type: Number,
+    default: 16
+  },
+  lineHeight: {
+    type: Number,
+    default: 1.7
   }
 })
 
@@ -869,6 +883,8 @@ defineExpose({
 
 <style scoped>
 .message-list-wrapper {
+  --message-font-size: 16px;
+  --message-line-height: 1.7;
   width: 100%;
   height: 100%;
   display: flex;
@@ -950,13 +966,13 @@ defineExpose({
 .chat-container {
   flex: 1;
   width: 100%;
-  max-width: 1200px;
+  max-width: 1280px;
   margin: 0 auto;
-  padding: 24px;
+  padding: 28px 32px 48px;
   overflow-y: auto;
   overflow-x: hidden;
   scroll-behavior: smooth;
-  background: #f8f9fa;
+  background: #f7f9fc;
 }
 
 .chat-container.selection-mode {
@@ -1027,11 +1043,11 @@ defineExpose({
 
 .user-message .message-content-wrapper {
   flex-direction: row-reverse;
-  justify-content: flex-end;
+  justify-content: flex-start;
 }
 
 .message-bubble {
-  max-width: 75%;
+  max-width: min(78%, 920px);
   flex-shrink: 1;
   position: relative;
   margin-bottom: 12px;
@@ -1044,8 +1060,8 @@ defineExpose({
 }
 
 .bubble-content {
-  padding: 14px 18px;
-  border-radius: 18px;
+  padding: 13px 17px;
+  border-radius: 16px;
   line-height: 1.6;
   position: relative;
 }
@@ -1057,24 +1073,24 @@ defineExpose({
 }
 
 .user-bubble .bubble-content {
-  background: transparent;
-  color: #1a1a1a;
-  border: 2px solid #e5e7eb;
-  border-bottom-right-radius: 4px;
-  box-shadow: none;
+  background: #eef5ff;
+  color: #172033;
+  border: 1px solid #cfe0fb;
+  border-bottom-right-radius: 5px;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, .06);
   font-weight: 500;
 }
 
 .assistant-bubble .bubble-content {
   background: white;
   color: #2d3748;
-  border-bottom-left-radius: 4px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  border-bottom-left-radius: 5px;
+  box-shadow: 0 2px 10px rgba(15, 23, 42, .05);
   border: 1px solid #e2e8f0;
 }
 
 .model-badge {
-  margin-bottom: 8px;
+  margin: 0 0 6px 2px;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -1329,6 +1345,43 @@ defineExpose({
 
 .message-text {
   width: 100%;
+  font-size: var(--message-font-size);
+  line-height: var(--message-line-height);
+  overflow-wrap: anywhere;
+}
+
+.message-text :deep(.markdown-body) {
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.message-text :deep(.markdown-body p),
+.message-text :deep(.markdown-body li),
+.message-text :deep(.markdown-body blockquote) {
+  line-height: inherit;
+}
+
+.message-text :deep(.markdown-body h1) {
+  font-size: 2em;
+}
+
+.message-text :deep(.markdown-body h2) {
+  font-size: 1.6em;
+}
+
+.message-text :deep(.markdown-body h3) {
+  font-size: 1.3em;
+}
+
+.message-text :deep(.markdown-body h4),
+.message-text :deep(.markdown-body h5),
+.message-text :deep(.markdown-body h6) {
+  font-size: 1.1em;
+}
+
+.message-text :deep(.markdown-body code),
+.message-text :deep(.markdown-body pre code) {
+  font-size: 0.875em;
 }
 
 /* 消息操作按钮 - 外部悬浮 */
@@ -1492,57 +1545,43 @@ defineExpose({
 }
 
 .avatar {
-  width: 40px;
-  height: 40px;
-  min-width: 40px;
-  min-height: 40px;
-  border-radius: 12px;
+  width: 34px;
+  height: 34px;
+  min-width: 34px;
+  min-height: 34px;
+  border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  font-size: 18px;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0;
   position: relative;
-  transition: all 0.3s ease;
+  transition: background .18s ease, color .18s ease;
+}
+
+.avatar-label {
+  line-height: 1;
+  transform: translateY(-.5px);
+}
+
+@media (max-width: 720px) {
+  .chat-container { padding: 20px 12px 36px; }
+  .message-row, .message-content-wrapper { gap: 8px; }
+  .message-bubble { max-width: calc(100% - 50px); }
+  .avatar { width: 32px; height: 32px; min-width: 32px; min-height: 32px; }
+  .bubble-content { padding: 11px 14px; }
 }
 
 .user-avatar {
-  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
-  color: white;
-  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.25);
-}
-
-.user-avatar::before {
-  content: '';
-  position: absolute;
-  inset: -2px;
-  border-radius: 12px;
-  padding: 2px;
-  background: linear-gradient(135deg, #3b82f6, #2563eb);
-  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  opacity: 0.3;
+  background: #e7effc;
+  color: #315c9f;
 }
 
 .assistant-avatar {
-  background: linear-gradient(135deg, #2d3748 0%, #1a202c 100%);
-  color: #f7fafc;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-  border: 2px solid #4a5568;
-}
-
-.assistant-avatar::after {
-  content: '';
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  width: 8px;
-  height: 8px;
-  background: #48bb78;
-  border-radius: 50%;
-  border: 2px solid #2d3748;
-  box-shadow: 0 0 8px rgba(72, 187, 120, 0.6);
+  background: #e9edf2;
+  color: #4b5563;
 }
 
 @keyframes fadeInMessage {

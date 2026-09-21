@@ -38,6 +38,12 @@ from backend.api.models import (
 from backend.services.audio_recorder import AudioRecorder
 from backend.services.voice_recognizer import VoiceRecognizer
 from backend.services.streaming_asr import StreamingASR
+from backend.services.chat_context import build_scoped_request
+from backend.services.session_prompt import (
+    compose_session_system_prompt,
+    create_default_session_config,
+    render_session_user_prompt,
+)
 from backend.services.session_storage import session_storage
 from backend.utils.logger import get_api_logger
 from backend.utils.chat_logger import (
@@ -50,7 +56,7 @@ import time
 
 # 导入配置
 try:
-    from config import OPENAI_CONFIG, DEFAULT_CONFIG_NAME
+    from config import OPENAI_CONFIG, DEFAULT_CONFIG_NAME, CHAT_CONTEXT_CONFIG
 except ImportError:
     OPENAI_CONFIG = [
         {
@@ -61,8 +67,152 @@ except ImportError:
         }
     ]
     DEFAULT_CONFIG_NAME = "OpenAI"
+    CHAT_CONTEXT_CONFIG = {
+        "max_history_turns": 15,
+        "max_history_chars": 12000,
+        "include_assistant_history": False,
+        "debug_context": True,
+        "debug_context_full": False,
+        "debug_preview_chars": 160,
+    }
 
 logger = get_api_logger()
+
+
+def log_model_request_context(
+    model: str,
+    messages: List[Dict[str, str]],
+    label: str = "聊天",
+    context_settings: Optional[Dict[str, Any]] = None,
+):
+    """Print a safe, compact summary of the exact messages sent to a model.
+
+    The API logger already writes to the terminal and to ``backend/logs``.
+    Keep the default output bounded so a long prompt does not flood the
+    console; set ``CHAT_DEBUG_CONTEXT_FULL=1`` when full message bodies are
+    needed for a local debugging session.
+    """
+    if not CHAT_CONTEXT_CONFIG.get("debug_context", True):
+        return
+
+    total_chars = sum(len(str(message.get("content", ""))) for message in messages)
+    user_count = sum(1 for message in messages if message.get("role") == "user")
+    assistant_count = sum(1 for message in messages if message.get("role") == "assistant")
+    system_count = sum(1 for message in messages if message.get("role") == "system")
+    estimated_tokens = max(1, total_chars // 4) if total_chars else 0
+    context_settings = context_settings or CHAT_CONTEXT_CONFIG
+    logger.info(
+        f"📨 [模型请求上下文] label={label}, model={model}, "
+        f"messages={len(messages)} (system={system_count}, user={user_count}, "
+        f"assistant={assistant_count}), chars={total_chars}, "
+        f"estimated_tokens≈{estimated_tokens}, "
+        f"max_history_turns={context_settings.get('max_history_turns', 15)}, "
+        f"max_history_chars={context_settings.get('max_history_chars', 12000)}, "
+        f"include_assistant={context_settings.get('include_assistant_history', False)}"
+    )
+
+    preview_chars = CHAT_CONTEXT_CONFIG.get("debug_preview_chars", 160)
+    show_full = CHAT_CONTEXT_CONFIG.get("debug_context_full", False)
+    for index, message in enumerate(messages, 1):
+        role = message.get("role", "unknown")
+        content = str(message.get("content", ""))
+        shown = content if show_full else content[:preview_chars]
+        shown = shown.replace("\n", "\\n")
+        if not show_full and len(content) > preview_chars:
+            shown += "..."
+        logger.info(f"   [{label}] {index:02d} role={role}, chars={len(content)}: {shown}")
+
+
+def resolve_chat_context_config(session_config: Optional[SessionConfig]) -> Dict[str, Any]:
+    """Resolve global context defaults with optional per-session overrides."""
+    settings = {
+        "max_history_turns": CHAT_CONTEXT_CONFIG.get("max_history_turns", 15),
+        "max_history_chars": CHAT_CONTEXT_CONFIG.get("max_history_chars", 12000),
+        "include_assistant_history": CHAT_CONTEXT_CONFIG.get(
+            "include_assistant_history", False
+        ),
+    }
+    if session_config is not None:
+        if session_config.max_history_turns is not None:
+            settings["max_history_turns"] = session_config.max_history_turns
+        if session_config.max_history_chars is not None:
+            settings["max_history_chars"] = session_config.max_history_chars
+        if session_config.include_assistant_history is not None:
+            settings["include_assistant_history"] = session_config.include_assistant_history
+    return settings
+
+
+def trim_history_context(
+    messages: List[Dict[str, str]],
+    max_chars: int,
+) -> List[Dict[str, str]]:
+    """Trim historical API messages to a bounded character budget.
+
+    System messages are always retained. Older user turns are removed first;
+    when one remaining message is itself larger than the budget, keep its
+    newest tail rather than dropping the whole conversation.
+    """
+    if max_chars <= 0:
+        return messages
+
+    system_messages = [
+        message for message in messages if message.get("role") == "system"
+    ]
+    history_messages = [
+        message for message in messages if message.get("role") != "system"
+    ]
+
+    # Group a user message with any immediately following assistant messages,
+    # so dropping old context never leaves an orphaned assistant turn.
+    turns = []
+    current_turn = []
+    for message in history_messages:
+        if message.get("role") == "user" and current_turn:
+            turns.append(current_turn)
+            current_turn = []
+        current_turn.append(message)
+    if current_turn:
+        turns.append(current_turn)
+
+    def turns_chars() -> int:
+        return sum(
+            len(str(message.get("content", "")))
+            for turn in turns
+            for message in turn
+        )
+
+    # Drop complete oldest turns first, but always retain the newest turn.
+    while len(turns) > 1 and turns_chars() > max_chars:
+        turns.pop(0)
+
+    if turns and turns_chars() > max_chars:
+        # If the newest turn itself is too large, preserve the user question
+        # first and use any remaining budget for assistant text. This keeps a
+        # meaningful latest question even when it is very long.
+        turn = turns[0]
+        user_index = next(
+            (index for index, message in enumerate(turn)
+             if message.get("role") == "user"),
+            0,
+        )
+        user_message = turn[user_index]
+        user_content = str(user_message.get("content", ""))
+        kept_user = user_content[-max_chars:]
+        remaining = max_chars - len(kept_user)
+        bounded_turn = [{**user_message, "content": kept_user}]
+        if remaining > 0:
+            for message in turn[user_index + 1:]:
+                content = str(message.get("content", ""))
+                if not content:
+                    continue
+                kept = content[-remaining:]
+                bounded_turn.append({**message, "content": kept})
+                remaining -= len(kept)
+                if remaining <= 0:
+                    break
+        turns[0] = bounded_turn
+
+    return system_messages + [message for turn in turns for message in turn]
 
 # 创建路由器
 router = APIRouter()
@@ -190,7 +340,7 @@ def init_default_session() -> Session:
         created_at=current_time,
         updated_at=current_time,
         messages=[],
-        session_config=SessionConfig()  # 使用默认配置
+        session_config=create_default_session_config()
     )
     
     # 保存到磁盘（自动按月分组）
@@ -605,11 +755,22 @@ async def get_recording_status():
     global streaming_asr
     
     if not streaming_asr:
-        return {"is_recording": False, "auto_stopped": False}
+        return {
+            "is_recording": False,
+            "auto_stopped": False,
+            "partial_text": "",
+        }
     
     return {
         "is_recording": streaming_asr.is_recording,
-        "auto_stopped": streaming_asr.auto_stopped
+        "auto_stopped": streaming_asr.auto_stopped,
+        # Soniox emits hypotheses while audio is still being sent. Expose
+        # the latest one so the UI can render the live transcript.
+        "partial_text": (
+            streaming_asr.partial_text
+            or streaming_asr.result_text
+            or ""
+        ),
     }
 
 
@@ -717,6 +878,8 @@ async def chat(request: ChatRequest):
     # 如果是第一条消息，自动生成标题（取前20个字符）
     if len(current_session.messages) == 1 and current_session.title == "新对话":
         current_session.title = request.message[:20] + ("..." if len(request.message) > 20 else "")
+
+    context_settings = resolve_chat_context_config(session_config)
     
     def build_messages_for_model(target_model: str) -> List[Dict[str, str]]:
         """
@@ -731,22 +894,27 @@ async def chat(request: ChatRequest):
         api_messages = []
         
         # 1. 添加 system prompt（如果有）
-        system_prompt = None
-        if current_session.session_config and current_session.session_config.system_prompt:
-            system_prompt = current_session.session_config.system_prompt
-        elif current_session.system_prompt:
-            system_prompt = current_session.system_prompt
-        
+        system_prompt = compose_session_system_prompt(current_session)
         if system_prompt:
             api_messages.append({"role": "system", "content": system_prompt})
         
-        # 2. 遍历历史消息，构建上下文
-        # 排除最后一条（刚添加的用户消息）
-        for msg in current_session.messages[:-1]:
+        # 2. 只取最近 N 轮用户问题，排除最后一条（当前用户消息）。
+        # 一轮按 user 消息计数，而不是按底层 message 条数计数。
+        history_messages = current_session.messages[:-1]
+        user_indexes = [
+            index for index, msg in enumerate(history_messages)
+            if msg.role == "user"
+        ]
+        max_history_turns = context_settings["max_history_turns"]
+        if user_indexes and len(user_indexes) > max_history_turns:
+            history_messages = history_messages[user_indexes[-max_history_turns]:]
+
+        include_assistant = context_settings["include_assistant_history"]
+        for msg in history_messages:
             if msg.role == 'user':
-                # 用户消息：所有模型都需要
+                # 默认只发送用户问题，节省上下文；assistant 历史可配置打开。
                 api_messages.append({"role": "user", "content": msg.content})
-            elif msg.role == 'assistant':
+            elif msg.role == 'assistant' and include_assistant:
                 # assistant 消息：只添加当前模型的回复
                 assistant_content = None
                 
@@ -768,11 +936,17 @@ async def chat(request: ChatRequest):
                 # 添加 assistant 消息（如果找到了对应模型的回复）
                 if assistant_content is not None:
                     api_messages.append({"role": "assistant", "content": assistant_content})
+
+        api_messages = trim_history_context(
+            api_messages, context_settings["max_history_chars"]
+        )
         
-        # 3. 添加当前用户消息
-        api_messages.append({"role": "user", "content": user_message.content})
-        
-        return api_messages
+        rendered_user_prompt = render_session_user_prompt(
+            current_session, user_message.content
+        )
+        return build_scoped_request(
+            api_messages, rendered_user_prompt, include_assistant
+        )
     
     async def generate():
         import asyncio
@@ -813,6 +987,9 @@ async def chat(request: ChatRequest):
                         # 为当前模型构建专属的消息历史
                         model_messages = build_messages_for_model(model_name)
                         logger.info(f"🔧 模型 {model_name} 的消息历史: {len(model_messages)} 条")
+                        log_model_request_context(
+                            model_name, model_messages, context_settings=context_settings
+                        )
                         
                         # 保存消息历史用于日志记录
                         model_messages_map[model_name] = model_messages
@@ -973,6 +1150,9 @@ async def chat(request: ChatRequest):
                 # 为当前模型构建专属的消息历史
                 model_messages = build_messages_for_model(model_to_use)
                 logger.info(f"🔧 模型 {model_to_use} 的消息历史: {len(model_messages)} 条")
+                log_model_request_context(
+                    model_to_use, model_messages, context_settings=context_settings
+                )
                 
                 client = OpenAI(
                     api_key=source_to_use.api_key,
@@ -1215,7 +1395,7 @@ async def create_session(title: str = "新对话"):
             created_at=current_time,
             updated_at=current_time,
             messages=[],
-            session_config=SessionConfig()  # 使用默认配置
+            session_config=create_default_session_config()
         )
         
         # 保存到磁盘（自动按月分组）
@@ -1572,6 +1752,8 @@ async def update_session_config(session_id: str, config: SessionConfig):
             - temperature: 温度参数（0-2）
             - top_p: Top-p 采样参数（0-1）
             - system_prompt: 系统提示词（可选）
+            - max_history_turns: 发送给模型的最近用户问题轮数（1-100）
+            - include_assistant_history: 是否附带对应模型的历史回答
     
     Returns:
         dict: 更新结果和新配置
@@ -1769,6 +1951,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
         raise HTTPException(status_code=400, detail="只能重新生成用户消息的响应")
     
     session_config = session.session_config
+    context_settings = resolve_chat_context_config(session_config)
     if request.model:
         models_to_use = [request.model]
         source_to_use = next((s for s in config_sources if request.model in s.models), None)
@@ -1847,21 +2030,27 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
         api_messages = []
         
         # 1. 添加 system prompt（如果有）
-        system_prompt = None
-        if session.session_config and session.session_config.system_prompt:
-            system_prompt = session.session_config.system_prompt
-        elif session.system_prompt:
-            system_prompt = session.system_prompt
-        
+        system_prompt = compose_session_system_prompt(session)
         if system_prompt:
             api_messages.append({"role": "system", "content": system_prompt})
         
-        # 2. 遍历历史消息，构建上下文
-        for msg in messages_history:
+        # 2. 只保留最近 N 轮用户问题；assistant 历史按配置决定是否加入。
+        # Keep the target question outside both history limits and packaging.
+        prior_history = [msg for msg in messages_history if msg.id != message_id]
+        selected_history = prior_history
+        user_indexes = [
+            index for index, msg in enumerate(prior_history)
+            if msg.role == "user"
+        ]
+        max_history_turns = context_settings["max_history_turns"]
+        if user_indexes and len(user_indexes) > max_history_turns:
+            selected_history = prior_history[user_indexes[-max_history_turns]:]
+
+        include_assistant = context_settings["include_assistant_history"]
+        for msg in selected_history:
             if msg.role == 'user':
-                # 用户消息：所有模型都需要
                 api_messages.append({"role": "user", "content": msg.content})
-            elif msg.role == 'assistant':
+            elif msg.role == 'assistant' and include_assistant:
                 # assistant 消息：只添加当前模型的回复
                 assistant_content = None
                 
@@ -1883,8 +2072,17 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                 # 添加 assistant 消息（如果找到了对应模型的回复）
                 if assistant_content is not None:
                     api_messages.append({"role": "assistant", "content": assistant_content})
+
+        api_messages = trim_history_context(
+            api_messages, context_settings["max_history_chars"]
+        )
         
-        return api_messages
+        rendered_user_prompt = render_session_user_prompt(
+            session, target_message.content
+        )
+        return build_scoped_request(
+            api_messages, rendered_user_prompt, include_assistant
+        )
     
     async def generate():
         import asyncio
@@ -1921,6 +2119,12 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                         # 为当前模型构建专属的消息历史
                         model_messages = build_messages_for_model_regenerate(model_name)
                         logger.info(f"🔧 重新生成 - 模型 {model_name} 的消息历史: {len(model_messages)} 条")
+                        log_model_request_context(
+                            model_name,
+                            model_messages,
+                            label="重新生成",
+                            context_settings=context_settings,
+                        )
                         
                         # 保存消息历史用于日志记录
                         model_messages_map[model_name] = model_messages
@@ -2079,6 +2283,12 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                 # 为当前模型构建专属的消息历史
                 model_messages = build_messages_for_model_regenerate(model_to_use)
                 logger.info(f"🔧 重新生成 - 模型 {model_to_use} 的消息历史: {len(model_messages)} 条")
+                log_model_request_context(
+                    model_to_use,
+                    model_messages,
+                    label="重新生成",
+                    context_settings=context_settings,
+                )
                 
                 client = OpenAI(
                     api_key=source_to_use.api_key,

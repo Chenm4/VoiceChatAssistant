@@ -3,7 +3,7 @@ API 数据模型
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Literal
 import time
 
 
@@ -73,6 +73,21 @@ class SessionConfig(BaseModel):
     temperature: float = 0.7
     top_p: float = 1.0
     system_prompt: Optional[str] = None
+    # 模板内容在创建/选择模板时保存为快照；之后不会按模板 ID 自动追新版本。
+    prompt_template_id: Optional[str] = None
+    prompt_template_version: Optional[int] = Field(default=None, ge=1)
+    user_prompt_template: Optional[str] = None
+    # None 是旧会话的兼容状态：既不读取共享背景，也不追加 background_context。
+    background_mode: Optional[Literal["shared", "custom", "none"]] = None
+    # 与行为规则分开保存的个人经历、实习和项目背景。
+    background_context: Optional[str] = None
+    # 上下文控制：None 表示使用 config.py 中的全局默认值。
+    max_history_turns: Optional[int] = Field(default=None, ge=1, le=100)
+    max_history_chars: Optional[int] = Field(default=None, ge=1000, le=200000)
+    include_assistant_history: Optional[bool] = None
+    # 当前会话的消息阅读样式。
+    display_font_size: int = Field(default=16, ge=12, le=72)
+    display_line_height: float = Field(default=1.7, ge=1.0, le=3.0)
 
 
 class ChatRequest(BaseModel):

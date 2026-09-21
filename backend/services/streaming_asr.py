@@ -25,7 +25,8 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from backend.utils.logger import get_asr_logger
 from backend.services.volcengine_streaming import VolcengineStreamingClient
-from config import AUDIO_CONFIG, VOLCENGINE_CONFIG
+from backend.services.soniox_streaming import SonioxStreamingClient
+from config import AUDIO_CONFIG, ASR_CONFIG, SONIOX_CONFIG, VOLCENGINE_CONFIG
 
 
 class StreamingASR:
@@ -70,6 +71,7 @@ class StreamingASR:
         self.is_recording: bool = False
         self.audio_queue: Optional[asyncio.Queue] = None
         self.result_text: str = ""
+        self.partial_text: str = ""
         self.error_message: Optional[str] = None
         self.ws_client: Optional[VolcengineStreamingClient] = None
         self.stream: Optional[pyaudio.Stream] = None
@@ -81,6 +83,7 @@ class StreamingASR:
         self.recording_start_time: Optional[float] = None  # 录音开始时间
         self.max_duration_seconds: int = AUDIO_CONFIG.get('max_duration_minutes', 5) * 60  # 最大录音时长（秒）
         self.auto_stopped: bool = False  # 是否因超时自动停止
+        self.provider: str = ASR_CONFIG.get('provider', 'soniox').lower()
         
         # 音频参数
         self.CHUNK: int = AUDIO_CONFIG['chunk']
@@ -88,9 +91,13 @@ class StreamingASR:
         self.CHANNELS: int = AUDIO_CONFIG['channels']
         self.RATE: int = AUDIO_CONFIG['rate']
         
-        # WebSocket 参数（火山引擎 v2/asr 协议）
+        # 音频分段参数。两个后端都使用 16-bit PCM，并通过持久连接流式传输。
         self.url: str = VOLCENGINE_CONFIG.get('ws_url', 'wss://openspeech.bytedance.com/api/v2/asr')
-        self.segment_duration: int = VOLCENGINE_CONFIG.get('segment_duration', 200)
+        self.segment_duration: int = (
+            VOLCENGINE_CONFIG.get('segment_duration', 200)
+            if self.provider == 'volcengine'
+            else 200
+        )
         
         # 计算每个音频包的大小（字节数）
         # segment_duration (200ms) -> 每包需要多少帧
@@ -166,20 +173,52 @@ class StreamingASR:
             connect_start = time.time()
             self.logger.info("🔗 [建立连接] 正在连接到 ASR 服务（录音已开始）...")
             
-            self.ws_client = VolcengineStreamingClient(
-                appid=VOLCENGINE_CONFIG['appid'],
-                token=VOLCENGINE_CONFIG['token'],
-                cluster=VOLCENGINE_CONFIG['cluster'],
-                ws_url=self.url,
-                segment_duration=self.segment_duration
+            if self.provider == 'soniox':
+                self.ws_client = SonioxStreamingClient(
+                    api_key=SONIOX_CONFIG['api_key'],
+                    ws_url=SONIOX_CONFIG.get('ws_url'),
+                    model=SONIOX_CONFIG['model'],
+                    sample_rate=self.RATE,
+                    num_channels=self.CHANNELS,
+                    language=SONIOX_CONFIG.get('language', 'zh'),
+                    context=SONIOX_CONFIG.get('context'),
+                )
+            elif self.provider == 'volcengine':
+                self.ws_client = VolcengineStreamingClient(
+                    appid=VOLCENGINE_CONFIG['appid'],
+                    token=VOLCENGINE_CONFIG['token'],
+                    cluster=VOLCENGINE_CONFIG['cluster'],
+                    ws_url=self.url,
+                    segment_duration=self.segment_duration
+                )
+            else:
+                raise ValueError(
+                    f"不支持的 ASR_PROVIDER: {self.provider}。可选值为 soniox 或 volcengine"
+                )
+            endpoint = (
+                SONIOX_CONFIG.get('ws_url')
+                if self.provider == 'soniox'
+                else self.url
             )
-            self.logger.info(f"📝 [创建客户端] URL={self.url}, segment_duration={self.segment_duration}ms")
+            self.logger.info(
+                f"📝 [创建客户端] provider={self.provider}, URL={endpoint}, "
+                f"segment_duration={self.segment_duration}ms"
+            )
             
-            await self.ws_client.__aenter__()  # 创建 session
-            self.logger.info("✅ [Session创建] aiohttp session 已创建")
+            await self.ws_client.__aenter__()  # 初始化后端资源
+            self.logger.info(f"✅ [Session创建] {self.provider} ASR 资源已初始化")
             
             await self.ws_client.create_connection()
-            self.logger.info(f"✅ [WebSocket连接] 连接对象: {self.ws_client.ws}")
+            # Both adapters currently expose a websocket as ``ws``. Keep this
+            # provider-neutral logging so a future adapter does not break
+            # startup merely because it uses a different connection field.
+            connection = getattr(self.ws_client, 'ws', None)
+            if connection is None:
+                connection = getattr(self.ws_client, '_client', None)
+            self.logger.info(
+                f"✅ [ASR连接] provider={self.provider}, "
+                f"connection={'ready' if connection is not None else 'created'}"
+            )
             
             connect_elapsed = (time.time() - connect_start) * 1000
             self.logger.info(f"✅ [连接成功] 耗时: {connect_elapsed:.2f}ms")
@@ -380,6 +419,19 @@ class StreamingASR:
                 
                 # 服务端按块返回结果：结束块已发送且收到的响应数达到发送块数时，
                 # 该响应即为最终结果（响应可能滞后于发送，不能以 is_last 为准）
+                # Soniox adapter emits one explicit final response after its
+                # worker has drained the audio stream.  Volcengine keeps the
+                # original chunk-count based completion check below.
+                if self.provider == 'soniox' and response.is_last_package:
+                    self.result_text = self._extract_text(response.payload_msg)
+                    if response.code != 0:
+                        self.error_message = (response.payload_msg or {}).get('message', 'Soniox 识别失败')
+                    elif self.result_text:
+                        self.logger.info(f"✅ [Soniox识别成功] 文本: \"{self.result_text}\"")
+                    else:
+                        self.error_message = "未检测到有效语音内容"
+                    break
+
                 if self.ws_client.finished and response_count >= self.ws_client.chunks_sent:
                     self.result_text = self._extract_text(response.payload_msg)
                     
@@ -394,6 +446,8 @@ class StreamingASR:
                 # 中间结果（可选）
                 if response.payload_msg:
                     partial_text = self._extract_text(response.payload_msg)
+                    if partial_text:
+                        self.partial_text = partial_text
                     if partial_text and response_count % 5 == 0:  # 每5个响应记录一次
                         self.logger.debug(f"📝 [部分结果] \"{partial_text}\"")
             
@@ -480,17 +534,33 @@ class StreamingASR:
             wait_elapsed = (time.time() - wait_start) * 1000
             self.logger.info(f"✅ [队列清空] 耗时: {wait_elapsed:.2f}ms")
             
-            # 4. 等待识别结果（最多等待5秒）
+            # 4. 等待发送/接收任务完成，确保 Soniox 的最后响应已经被
+            # 消费后再关闭 WebSocket。旧逻辑只等待 result_text，容易在
+            # 服务端刚返回最后响应前提前关闭连接，造成空结果。
             self.logger.info("⏳ [等待结果] 等待 ASR 返回最终结果...")
             result_start = time.time()
-            
-            for _ in range(50):  # 最多等待5秒
+
+            asr_task = getattr(self, '_task', None)
+            if asr_task and asr_task is not asyncio.current_task() and not asr_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(asr_task), timeout=10.0)
+                except asyncio.TimeoutError:
+                    self.logger.warning("⚠️ [等待结果] ASR 任务超过10秒，继续使用当前结果")
+                except Exception as task_error:
+                    self.logger.warning(f"⚠️ [等待结果] ASR 任务结束异常: {task_error}")
+
+            for _ in range(30):  # 任务完成后的短暂状态同步等待
                 if self.result_text or self.error_message:
                     break
                 await asyncio.sleep(0.1)
-            
+
             result_elapsed = (time.time() - result_start) * 1000
             self.logger.info(f"✅ [结果获取] 耗时: {result_elapsed:.2f}ms")
+
+            # 如果服务端只返回非最终 token，使用最新的实时假设，避免
+            # 因网络关闭时序导致空结果。
+            if not self.result_text and self.partial_text and not self.error_message:
+                self.result_text = self.partial_text
             
             # 5. 关闭 WebSocket 连接
             self.logger.info("🔌 [关闭连接] 关闭 WebSocket...")

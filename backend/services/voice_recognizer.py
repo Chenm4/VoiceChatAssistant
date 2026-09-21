@@ -1,15 +1,16 @@
 """
 语音识别服务
 
-提供双识别器策略的语音识别功能。
-优先使用字节跳动 ASR，失败时自动切换到火山引擎 ASR。
+提供可切换的语音识别功能。
+默认使用 Soniox，失败时自动切换到配置的备用 ASR。
 
 支持的识别器：
-1. 字节跳动 ASR（主要）- 更准确
-2. 火山引擎 ASR（备用）- 容错保障
+1. Soniox ASR（默认）
+2. 火山引擎或字节跳动 ASR（可选备用）
 """
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 from typing import Tuple, Optional
@@ -20,15 +21,16 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 from backend.utils.asr_demo import AsrWsClient as VolcengineAsrClient, AudioType
 from backend.utils.logger import get_asr_logger
 from backend.utils.sauc_client import AsrWsClient as BytedanceAsrClient
-from config import BYTEDANCE_ASR_CONFIG, VOLCENGINE_CONFIG
+import websockets
+from config import ASR_CONFIG, BYTEDANCE_ASR_CONFIG, SONIOX_CONFIG, VOLCENGINE_CONFIG
 
 
 class VoiceRecognizer:
     """
     语音识别服务
     
-    使用双识别器策略提供高可用的语音识别功能。
-    优先使用字节跳动 ASR，失败时自动切换到火山引擎 ASR。
+    使用可配置的主/备用识别器策略提供高可用的语音识别功能。
+    默认使用 Soniox，失败时自动切换到配置的备用 ASR。
     
     Attributes:
         bd_app_key: 字节跳动 ASR 应用密钥
@@ -51,9 +53,11 @@ class VoiceRecognizer:
         """
         初始化语音识别服务
         
-        从配置文件加载字节跳动和火山引擎的 API 配置。
+        从配置文件加载各 ASR 提供方的 API 配置。
         """
         self.logger = get_asr_logger()
+        self.provider: str = ASR_CONFIG.get('provider', 'soniox').lower()
+        self.fallback_provider: str = ASR_CONFIG.get('fallback_provider', 'volcengine').lower()
         
         # 字节跳动配置（主要）
         self.bd_app_key: str = BYTEDANCE_ASR_CONFIG['app_key']
@@ -67,6 +71,11 @@ class VoiceRecognizer:
         self.ve_cluster: str = VOLCENGINE_CONFIG['cluster']
         
         self.logger.info("初始化语音识别服务:")
+        self.logger.info(f"  默认: {self.provider} | 备用: {self.fallback_provider}")
+        self.logger.info(
+            f"  Soniox (api_key={'SET' if SONIOX_CONFIG.get('api_key') else 'EMPTY'}, "
+            f"host={SONIOX_CONFIG.get('api_host')}, model={SONIOX_CONFIG.get('model')})"
+        )
         self.logger.info(
             f"  主要: 字节跳动 ASR "
             f"(app_key={'SET' if self.bd_app_key else 'EMPTY'}, "
@@ -105,7 +114,7 @@ class VoiceRecognizer:
             ) as client:
                 final_text = ""
                 async for response in client.execute(audio_file):
-                    logger.debug(f"收到响应: code={response.code}, is_last={response.is_last_package}")
+                    self.logger.debug(f"收到响应: code={response.code}, is_last={response.is_last_package}")
                     
                     if response.code == 0:  # 成功
                         if response.is_last_package and response.payload_msg:
@@ -200,11 +209,60 @@ class VoiceRecognizer:
             self.logger.error(f"❌ {error_msg}", exc_info=True)
             return None, error_msg
     
+    async def recognize_with_soniox(self, audio_file: str) -> Tuple[Optional[str], Optional[str]]:
+        """Recognize a WAV file through the Soniox Japan project endpoint."""
+        self.logger.info(f"🎯 使用 Soniox ASR 识别: {audio_file}")
+        if not SONIOX_CONFIG.get('api_key'):
+            return None, "Soniox API Key 未设置，请设置 SONIOX_API_KEY"
+        try:
+            with open(audio_file, 'rb') as audio_file_handle:
+                audio = audio_file_handle.read()
+            ws_url = SONIOX_CONFIG.get('ws_url', 'wss://stt-rt.jp.soniox.com/transcribe-websocket')
+            config = {
+                'api_key': SONIOX_CONFIG['api_key'],
+                'model': SONIOX_CONFIG.get('model', 'stt-rt-v5'),
+                'audio_format': 'wav',
+                'language_hints': [SONIOX_CONFIG.get('language', 'zh')],
+                'enable_endpoint_detection': True,
+            }
+            if SONIOX_CONFIG.get('context'):
+                config['context'] = SONIOX_CONFIG['context']
+            final_tokens = []
+            async with websockets.connect(ws_url, max_size=1000000000) as ws:
+                await ws.send(json.dumps(config))
+                await ws.send(audio)
+                # The Japan endpoint finalizes reliably with an empty text
+                # frame (an empty binary frame may remain pending until the
+                # request timeout).
+                await ws.send('')
+                async for raw in ws:
+                    if isinstance(raw, bytes):
+                        raw = raw.decode('utf-8')
+                    event = json.loads(raw)
+                    if event.get('error_code'):
+                        return None, event.get('error_message', 'Soniox 识别失败')
+                    final_tokens.extend(
+                        token.get('text', '')
+                        for token in (event.get('tokens') or [])
+                        if token.get('is_final') and token.get('text') != '<end>'
+                    )
+                    if event.get('finished'):
+                        break
+            text = ''.join(final_tokens)
+            if text:
+                self.logger.info(f"✅ Soniox 识别成功: {text}")
+                return text, None
+            return None, "Soniox 未检测到有效语音内容"
+        except Exception as e:
+            error_msg = f"Soniox 识别异常: {str(e)}"
+            self.logger.error(f"❌ {error_msg}", exc_info=True)
+            return None, error_msg
+
     async def recognize_file(self, audio_file: str) -> Tuple[Optional[str], Optional[str]]:
         """
         识别音频文件（智能切换策略）
-        
-        优先使用字节跳动 ASR，失败时自动切换到火山引擎 ASR。
+
+        按 ``ASR_CONFIG`` 中的主识别器和备用识别器依次尝试。
         自动记录识别耗时和切换过程。
         
         Args:
@@ -229,50 +287,27 @@ class VoiceRecognizer:
         self.logger.info(f"🎬 [开始识别] 音频文件: {audio_file}")
         self.logger.info("=" * 80)
         
-        # 1. 优先尝试字节跳动 ASR
-        bd_start = time.time()
-        self.logger.info("🎯 [方案A] 尝试字节跳动 ASR...")
-        
-        text, error = await self.recognize_with_bytedance(audio_file)
-        
-        bd_elapsed = (time.time() - bd_start) * 1000
-        
-        if text:
-            total_elapsed = (time.time() - total_start) * 1000
-            self.logger.info("✅ [成功] 字节跳动 ASR 识别成功")
-            self.logger.info(f"📈 [耗时统计] 字节跳动: {bd_elapsed:.2f}ms | 总计: {total_elapsed:.2f}ms")
-            self.logger.info("=" * 80)
-            return text, None
-        
-        # 2. 字节跳动失败，尝试火山引擎 ASR
-        self.logger.warning(f"⚠️ [失败] 字节跳动 ASR 失败 (耗时: {bd_elapsed:.2f}ms): {error}")
-        self.logger.info("🔄 [切换] 切换到火山引擎 ASR（备用方案）")
-        
-        ve_start = time.time()
-        self.logger.info("🎯 [方案B] 尝试火山引擎 ASR...")
-        
-        text, error = await self.recognize_with_volcengine(audio_file)
-        
-        ve_elapsed = (time.time() - ve_start) * 1000
-        
-        if text:
-            total_elapsed = (time.time() - total_start) * 1000
-            self.logger.info("✅ [成功] 火山引擎 ASR 识别成功")
-            self.logger.info(
-                f"📈 [耗时统计] 字节跳动: {bd_elapsed:.2f}ms | "
-                f"火山引擎: {ve_elapsed:.2f}ms | 总计: {total_elapsed:.2f}ms"
-            )
-            self.logger.info("=" * 80)
-            return text, None
-        
-        # 3. 两个都失败
-        total_elapsed = (time.time() - total_start) * 1000
-        self.logger.error("❌ [全部失败] 所有识别器均失败")
-        self.logger.error(
-            f"📈 [耗时统计] 字节跳动: {bd_elapsed:.2f}ms | "
-            f"火山引擎: {ve_elapsed:.2f}ms | 总计: {total_elapsed:.2f}ms"
-        )
-        self.logger.info("=" * 80)
-        
-        final_error = f"语音识别失败。字节跳动和火山引擎识别器均不可用。最后错误: {error}"
-        return None, final_error
+        methods = {
+            'soniox': self.recognize_with_soniox,
+            'volcengine': self.recognize_with_volcengine,
+            'bytedance': self.recognize_with_bytedance,
+        }
+        providers = []
+        for name in (self.provider, self.fallback_provider):
+            if name in methods and name not in providers:
+                providers.append(name)
+
+        errors = []
+        for name in providers:
+            started = time.time()
+            self.logger.info(f"🎯 尝试 {name} ASR...")
+            text, error = await methods[name](audio_file)
+            elapsed = (time.time() - started) * 1000
+            if text:
+                total_elapsed = (time.time() - total_start) * 1000
+                self.logger.info(f"✅ {name} 识别成功 ({elapsed:.2f}ms，总计 {total_elapsed:.2f}ms)")
+                return text, None
+            errors.append(f"{name}: {error}")
+            self.logger.warning(f"⚠️ {name} 失败 ({elapsed:.2f}ms): {error}")
+
+        return None, "语音识别失败。" + "；".join(errors)

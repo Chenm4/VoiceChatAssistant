@@ -127,6 +127,95 @@
       </div>
 
       <div class="section">
+        <label class="label">历史上下文轮数</label>
+        <el-input-number
+          v-model="contextTurns"
+          :min="1"
+          :max="100"
+          :step="1"
+          controls-position="right"
+          style="width: 100%"
+        />
+        <div class="prompt-hint">
+          每轮按一条用户问题计算；默认只发送最近 15 轮历史问题。
+        </div>
+      </div>
+
+      <div class="section">
+        <label class="label">历史上下文最大字符数</label>
+        <el-input-number
+          v-model="contextChars"
+          :min="1000"
+          :max="200000"
+          :step="1000"
+          controls-position="right"
+          style="width: 100%"
+        />
+        <div class="prompt-hint">
+          轮数和字符数同时生效，优先去掉更早的历史内容。
+        </div>
+      </div>
+
+      <div class="section context-assistant-option">
+        <div class="label-with-tag">
+          <label class="label">发送历史 AI 回答</label>
+          <el-tag size="small" type="info">可选</el-tag>
+        </div>
+        <el-switch v-model="includeAssistantHistory" />
+        <div class="prompt-hint">
+          关闭可节省上下文；开启后会把对应模型的历史回答一并发送。
+        </div>
+      </div>
+
+      <div class="section display-settings-section">
+        <div class="label-with-tag">
+          <label class="label">消息显示</label>
+          <el-tag size="small" type="success">当前会话</el-tag>
+        </div>
+
+        <div class="display-control">
+          <div class="display-control-header">
+            <span>正文字号</span>
+            <strong>{{ displayFontSize }} px</strong>
+          </div>
+          <el-slider
+            v-model="displayFontSize"
+            :min="12"
+            :max="72"
+            :step="1"
+            :show-tooltip="true"
+          />
+        </div>
+
+        <div class="display-control">
+          <div class="display-control-header">
+            <span>行间距</span>
+            <strong>{{ Number(displayLineHeight).toFixed(1) }}</strong>
+          </div>
+          <el-slider
+            v-model="displayLineHeight"
+            :min="1"
+            :max="3"
+            :step="0.1"
+            :show-tooltip="true"
+          />
+        </div>
+
+        <div
+          class="display-preview"
+          :style="{
+            fontSize: `${displayFontSize}px`,
+            lineHeight: displayLineHeight
+          }"
+        >
+          字体与行间距预览：MySQL、Redis、RabbitMQ、JVM
+        </div>
+        <div class="prompt-hint">
+          保存后立即应用到当前会话的用户消息、AI 回答、标题和代码。
+        </div>
+      </div>
+
+      <div class="section">
         <div class="label-with-tag">
           <label class="label">系统提示词</label>
           <el-tag size="small" type="warning">影响AI行为</el-tag>
@@ -140,9 +229,9 @@
           <el-option label="无（使用默认）" value="" />
           <el-option 
             v-for="template in promptTemplates" 
-            :key="template.name" 
+            :key="template.id || template.name"
             :label="template.name" 
-            :value="template.name" 
+            :value="template.id || template.name"
           />
           <el-option label="自定义..." value="custom" />
         </el-select>
@@ -152,10 +241,77 @@
           :rows="4"
           placeholder="输入自定义系统提示词（可选）&#10;&#10;例如：你是一个专业的编程助手，擅长解答技术问题..."
           style="width: 100%"
+          @input="handleSystemPromptInput"
         />
         <div class="prompt-hint">
           <el-icon><InfoFilled /></el-icon>
-          系统提示词会影响AI的回答风格和角色设定
+          实验室模板会在选中时保存一份会话快照。这里直接修改会自动转为自定义，不会改动实验室模板。
+        </div>
+        <div v-if="promptTemplateId" class="template-snapshot">
+          <div>
+            <el-tag size="small" type="primary">模板快照</el-tag>
+            <span>{{ selectedTemplateName }} · v{{ promptTemplateVersion || 1 }}</span>
+          </div>
+          <div class="user-prompt-preview">
+            User Prompt：{{ displayUserPromptTemplate }}
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="label-with-tag">
+          <label class="label">个人与项目背景资料</label>
+          <el-tag size="small" :type="backgroundMode === 'shared' ? 'success' : 'info'">
+            {{ backgroundMode === 'shared' ? '全局共享' : '当前会话' }}
+          </el-tag>
+        </div>
+        <el-radio-group v-model="backgroundMode" class="background-mode-group">
+          <el-radio-button label="shared">共享背景</el-radio-button>
+          <el-radio-button label="custom">会话专用</el-radio-button>
+          <el-radio-button label="none">不发送</el-radio-button>
+        </el-radio-group>
+
+        <template v-if="backgroundMode === 'shared'">
+          <el-input
+            v-model="sharedBackground"
+            type="textarea"
+            :rows="9"
+            resize="vertical"
+            :disabled="sharedBackgroundLoading"
+            placeholder="填写所有会话和八股实验室共用的个人、实习与项目资料。"
+            @input="sharedBackgroundTouched = true"
+          />
+          <div class="shared-background-warning">
+            <el-icon><InfoFilled /></el-icon>
+            这里是真正的全局共享资料。修改并保存后，会同步影响八股实验室以及所有使用“共享背景”的会话。
+          </div>
+        </template>
+
+        <template v-else-if="backgroundMode === 'custom'">
+          <el-input
+            v-model="backgroundContext"
+            type="textarea"
+            :rows="9"
+            resize="vertical"
+            placeholder="仅为当前会话填写实习、项目、职责和技术难点。"
+          />
+          <div class="prompt-hint neutral-hint">
+            <el-icon><InfoFilled /></el-icon>
+            此内容只保存在当前会话，不会改动八股实验室的共享背景。
+          </div>
+        </template>
+
+        <div v-else class="background-disabled-hint">
+          当前会话不会向模型发送个人、实习或项目背景，适合纯技术八股问题。
+        </div>
+      </div>
+
+      <div class="save-status" :class="{ dirty: isDirty }">
+        <el-icon><InfoFilled /></el-icon>
+        <div>
+          <strong>{{ isDirty ? '存在未保存修改' : '当前配置已生效' }}</strong>
+          <span v-if="isDirty">当前请求仍使用上次保存的配置。</span>
+          <span v-else>{{ effectiveConfigSummary }}</span>
         </div>
       </div>
 
@@ -175,7 +331,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { Setting, Close, InfoFilled, Select, Rank } from '@element-plus/icons-vue'
 import draggable from 'vuedraggable'
 import api from '../utils/api'
@@ -198,9 +354,25 @@ const selectedSource = ref('')
 const selectedModels = ref([])  // 改为数组支持多选
 const temperature = ref(0.7)
 const topP = ref(1)
+const contextTurns = ref(15)
+const contextChars = ref(12000)
+const includeAssistantHistory = ref(false)
+const displayFontSize = ref(16)
+const displayLineHeight = ref(1.7)
 const saving = ref(false)
 const systemPrompt = ref('')
+const backgroundContext = ref('')
+const backgroundMode = ref('shared')
+const sharedBackground = ref('')
+const loadedSharedBackground = ref(null)
+const sharedBackgroundLoading = ref(false)
+const sharedBackgroundTouched = ref(false)
 const selectedPromptTemplate = ref('')
+const promptTemplateId = ref('')
+const promptTemplateVersion = ref(null)
+const userPromptTemplate = ref('')
+const baselineState = ref(null)
+const initializedSessionId = ref(null)
 const MULTI_MODEL_PREFERENCES_KEY = 'multiModelDisplayPreferences'
 const DEFAULT_MULTI_MODEL_PREFERENCES = {
   displayMode: 'parallel',
@@ -210,28 +382,48 @@ const DEFAULT_MULTI_MODEL_PREFERENCES = {
 const multiModelDisplayMode = ref('parallel')
 const defaultDisplayModel = ref('')
 
+async function loadSharedPromptTemplates() {
+  sharedBackgroundLoading.value = true
+  try {
+    const catalog = await api.get('/prompt-lab/catalog')
+    const sharedTemplates = (catalog.prompts || []).map(prompt => ({
+      id: `lab:${prompt.id}`,
+      promptId: prompt.id,
+      name: `八股 · ${prompt.name} v${prompt.version || 1}`,
+      content: prompt.system_prompt,
+      version: prompt.version || 1,
+      userPromptTemplate: prompt.user_prompt_template || '面试题：{{question}}',
+      source: 'lab'
+    }))
+    promptTemplates.value = [
+      ...promptTemplates.value.filter(template => template.source !== 'lab'),
+      ...sharedTemplates
+    ]
+
+    const catalogBackground = catalog.background?.content || ''
+    loadedSharedBackground.value = catalogBackground
+    if (!sharedBackgroundTouched.value) {
+      sharedBackground.value = catalogBackground
+      if (baselineState.value) {
+        baselineState.value = {
+          ...baselineState.value,
+          shared_background: backgroundMode.value === 'shared' ? catalogBackground : null
+        }
+      }
+    }
+  } catch (error) {
+    console.warn('加载八股实验室提示词失败:', error)
+    ElMessage.warning('共享提示词和背景加载失败，当前会话配置仍可编辑')
+  } finally {
+    sharedBackgroundLoading.value = false
+  }
+}
+
 // 预设系统提示词模板
 const promptTemplates = ref([
   {
     name: '默认助手',
     content: '你是一个友好、专业的AI助手，能够回答各种问题并提供帮助。'
-  },
-  {
-    name: '面试准备助手',
-    content: `你是一个参与过讯飞实习的研二同学，能够回答在讯飞实习的各种细节以及计算机测试开发的相关知识。
-    下面的内容包含三部分，第一部分是我在讯飞实习的部分，第二部分是我个人在学校里面做的一个小项目潮人探店的内容，第三部分是面试官可能针对这些内容进行的提问以及对应的回答。以下是你回答的格式要求：
-● 分点总结先行（核心摘要区）：
-  ○ 在回答的最开头，必须使用列表（1, 2, 3...）给出总体的核心要点总结。
-  ○ 特别要求： 列表中的内容必须是逻辑完整、表达精准的“总结性长句”，严禁使用“断层”的关键词（如“JMeter压测”、“Redis缓存”等）。每一个分点都应该是一句能够独立支撑论点的技术结论或方案概述，让我能通过读列表就快速抓到回答的精髓。
-● 详细讲解随其后（技术深挖区）：
-  ○ 在列表下方，针对每一个总结点，结合我提供的资料进行深入的细节讲解、原理说明和案例复盘。
-  ○ 回答要体现技术深度（如：BIO/NIO的区别、Lua脚本的原子性、JMeter的Stripped模式等）。
-● 开放性问题处理：
-  ○ 针对“收获”、“挑战”、“选型理由”等开放性问题，请提供 4-5个不同的切入点，每个点都遵循上述“总结句+详细讲解”的格式，方便我根据实际面试情况进行筛选。
-● 资料对齐与参考：
-  ○ 如果是第三部分中已有的问题，请务必参考其中的答案逻辑，并结合前两部分的技术细节进行升华，不要脱离我提供的背景资料。
-● 角色辨别：
-  ○ 请分辨对话中哪些是面试官的提问。回答时语气要专业、自信，符合测试开发工程师的职业身份。`
   },
   {
     name: '编程专家',
@@ -276,6 +468,64 @@ const currentSourceModels = computed(() => {
   return source ? source.models : []
 })
 
+function getFormState() {
+  return {
+    source_name: selectedSource.value,
+    models: [...selectedModels.value],
+    temperature: Number(temperature.value),
+    top_p: Number(topP.value),
+    max_history_turns: Number(contextTurns.value),
+    max_history_chars: Number(contextChars.value),
+    include_assistant_history: Boolean(includeAssistantHistory.value),
+    display_font_size: Number(displayFontSize.value),
+    display_line_height: Number(displayLineHeight.value),
+    system_prompt: systemPrompt.value,
+    prompt_template_id: promptTemplateId.value,
+    prompt_template_version: promptTemplateVersion.value,
+    user_prompt_template: userPromptTemplate.value,
+    background_mode: backgroundMode.value,
+    background_context: backgroundMode.value === 'custom' ? backgroundContext.value : null,
+    shared_background: backgroundMode.value === 'shared' ? sharedBackground.value : null,
+    multi_model_display_mode: multiModelDisplayMode.value,
+    default_display_model: defaultDisplayModel.value
+  }
+}
+
+function setFormBaseline() {
+  baselineState.value = JSON.parse(JSON.stringify(getFormState()))
+}
+
+const isDirty = computed(() => {
+  if (!baselineState.value) return false
+  return JSON.stringify(getFormState()) !== JSON.stringify(baselineState.value)
+})
+
+const selectedTemplateName = computed(() => {
+  const template = promptTemplates.value.find(item => item.promptId === promptTemplateId.value)
+  return template?.name?.replace(/^八股 · /, '').replace(/ v\d+$/, '') || promptTemplateId.value
+})
+
+const displayUserPromptTemplate = computed(
+  () => userPromptTemplate.value || '面试题：{{question}}'
+)
+
+const effectiveConfigSummary = computed(() => {
+  let promptSummary = '默认系统提示词'
+  if (promptTemplateId.value) {
+    promptSummary = `${selectedTemplateName.value} v${promptTemplateVersion.value || 1} 快照`
+  } else if (systemPrompt.value) {
+    promptSummary = '自定义系统提示词'
+  }
+
+  const backgroundSummary = {
+    shared: '使用实验室共享背景',
+    custom: '使用当前会话专用背景',
+    none: '不发送背景资料'
+  }[backgroundMode.value]
+
+  return `${promptSummary}；${backgroundSummary}`
+})
+
 function loadMultiModelPreferences() {
   try {
     const raw = localStorage.getItem(MULTI_MODEL_PREFERENCES_KEY)
@@ -314,6 +564,7 @@ function saveMultiModelPreferences() {
 
 function initFromSession() {
   if (!props.session || !props.config) return
+  initializedSessionId.value = props.session.id
   loadMultiModelPreferences()
   const sessionConfig = props.session.session_config
   if (sessionConfig) {
@@ -328,33 +579,62 @@ function initFromSession() {
     }
     temperature.value = sessionConfig.temperature ?? 0.7
     topP.value = sessionConfig.top_p ?? 1
+    contextTurns.value = sessionConfig.max_history_turns ?? 15
+    contextChars.value = sessionConfig.max_history_chars ?? 12000
+    includeAssistantHistory.value = sessionConfig.include_assistant_history ?? false
+    displayFontSize.value = sessionConfig.display_font_size ?? 16
+    displayLineHeight.value = sessionConfig.display_line_height ?? 1.7
     systemPrompt.value = sessionConfig.system_prompt || ''
-    
-    // 检查是否匹配某个模板
-    selectedPromptTemplate.value = ''
-    if (systemPrompt.value) {
-      const matchedTemplate = promptTemplates.value.find(t => t.content === systemPrompt.value)
-      if (matchedTemplate) {
-        selectedPromptTemplate.value = matchedTemplate.name
-      } else {
-        selectedPromptTemplate.value = 'custom'
-      }
+    backgroundContext.value = sessionConfig.background_context || ''
+    // 旧会话的 system prompt 往往已经包含背景资料。缺少模式字段时
+    // 保持后端的 legacy 语义，不自动再叠加共享背景；新会话由后端明确写入 shared。
+    backgroundMode.value = sessionConfig.background_mode || 'none'
+    promptTemplateId.value = sessionConfig.prompt_template_id || ''
+    promptTemplateVersion.value = sessionConfig.prompt_template_version || null
+    userPromptTemplate.value = sessionConfig.user_prompt_template || ''
+
+    if (promptTemplateId.value) {
+      selectedPromptTemplate.value = `lab:${promptTemplateId.value}`
+    } else if (systemPrompt.value) {
+      const matchedTemplate = promptTemplates.value.find(
+        template => template.source !== 'lab' && template.content === systemPrompt.value
+      )
+      selectedPromptTemplate.value = matchedTemplate?.name || 'custom'
+    } else {
+      selectedPromptTemplate.value = ''
     }
   } else {
     selectedSource.value = props.config.current_source
     selectedModels.value = [props.config.current_model]
     temperature.value = 0.7
     topP.value = 1
+    contextTurns.value = 15
+    contextChars.value = 12000
+    includeAssistantHistory.value = false
+    displayFontSize.value = 16
+    displayLineHeight.value = 1.7
     systemPrompt.value = ''
+    backgroundContext.value = ''
+    backgroundMode.value = 'shared'
     selectedPromptTemplate.value = ''
+    promptTemplateId.value = ''
+    promptTemplateVersion.value = null
+    userPromptTemplate.value = ''
   }
-  
+
+  sharedBackground.value = loadedSharedBackground.value ?? ''
+  sharedBackgroundTouched.value = false
   if (selectedModels.value.length > 0 && !selectedModels.value.includes(defaultDisplayModel.value)) {
     defaultDisplayModel.value = selectedModels.value[0]
   }
+  setFormBaseline()
 }
 
-watch(() => [props.session, props.config], initFromSession, { deep: true, immediate: true })
+watch(() => props.session?.id, (sessionId) => {
+  if (!sessionId || sessionId === initializedSessionId.value) return
+  initFromSession()
+}, { immediate: true })
+onMounted(loadSharedPromptTemplates)
 
 watch(selectedModels, (models) => {
   if (models.length > 0 && !models.includes(defaultDisplayModel.value)) {
@@ -378,20 +658,37 @@ function removeModel(index) {
   }
 }
 
+function clearPromptTemplateAssociation() {
+  promptTemplateId.value = ''
+  promptTemplateVersion.value = null
+  userPromptTemplate.value = ''
+}
+
 function handlePromptTemplateChange() {
   if (selectedPromptTemplate.value === 'custom') {
-    // 选择自定义，不改变当前内容
+    clearPromptTemplateAssociation()
     return
   } else if (selectedPromptTemplate.value === '') {
-    // 选择无
     systemPrompt.value = ''
+    clearPromptTemplateAssociation()
   } else {
-    // 选择模板
-    const template = promptTemplates.value.find(t => t.name === selectedPromptTemplate.value)
+    const template = promptTemplates.value.find(t => (t.id || t.name) === selectedPromptTemplate.value)
     if (template) {
       systemPrompt.value = template.content
+      if (template.source === 'lab') {
+        promptTemplateId.value = template.promptId
+        promptTemplateVersion.value = template.version
+        userPromptTemplate.value = template.userPromptTemplate
+      } else {
+        clearPromptTemplateAssociation()
+      }
     }
   }
+}
+
+function handleSystemPromptInput() {
+  selectedPromptTemplate.value = 'custom'
+  clearPromptTemplateAssociation()
 }
 
 async function handleSave() {
@@ -403,16 +700,42 @@ async function handleSave() {
   
   saving.value = true
   try {
+    if (
+      backgroundMode.value === 'shared'
+      && sharedBackgroundTouched.value
+      && sharedBackground.value !== loadedSharedBackground.value
+    ) {
+      const savedBackground = await api.patch('/prompt-lab/background', {
+        content: sharedBackground.value
+      })
+      sharedBackground.value = savedBackground.content || ''
+      loadedSharedBackground.value = sharedBackground.value
+      sharedBackgroundTouched.value = false
+    }
+
     const payload = {
       source_name: selectedSource.value,
-      models: selectedModels.value,  // 发送模型数组
+      models: selectedModels.value,
       temperature: Number(temperature.value),
       top_p: Number(topP.value),
-      system_prompt: systemPrompt.value || null  // 发送系统提示词
+      max_history_turns: Number(contextTurns.value),
+      max_history_chars: Number(contextChars.value),
+      include_assistant_history: Boolean(includeAssistantHistory.value),
+      display_font_size: Number(displayFontSize.value),
+      display_line_height: Number(displayLineHeight.value),
+      system_prompt: systemPrompt.value || null,
+      prompt_template_id: promptTemplateId.value || null,
+      prompt_template_version: promptTemplateId.value ? promptTemplateVersion.value : null,
+      user_prompt_template: promptTemplateId.value ? (userPromptTemplate.value || null) : null,
+      background_mode: backgroundMode.value,
+      background_context: backgroundMode.value === 'custom'
+        ? (backgroundContext.value || null)
+        : null
     }
     const response = await api.put(`/sessions/${props.session.id}/config`, payload)
     if (response.success) {
       saveMultiModelPreferences()
+      setFormBaseline()
       ElMessage.success('会话配置已保存')
       emit('updated')
     }
@@ -428,8 +751,16 @@ function handleReset() {
   selectedModels.value = [props.config.current_model]
   temperature.value = 0.7
   topP.value = 1
+  contextTurns.value = 15
+  contextChars.value = 12000
+  includeAssistantHistory.value = false
+  displayFontSize.value = 16
+  displayLineHeight.value = 1.7
   systemPrompt.value = ''
+  backgroundContext.value = ''
+  backgroundMode.value = 'shared'
   selectedPromptTemplate.value = ''
+  clearPromptTemplateAssociation()
   multiModelDisplayMode.value = DEFAULT_MULTI_MODEL_PREFERENCES.displayMode
   defaultDisplayModel.value = selectedModels.value[0] || ''
 }
@@ -461,6 +792,36 @@ function handleReset() {
   align-items: center;
   gap: 8px;
   font-size: 16px;
+}
+
+.display-control + .display-control {
+  margin-top: 12px;
+}
+
+.display-control-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #4b5563;
+  font-size: 13px;
+  margin-bottom: 2px;
+}
+
+.display-control-header strong {
+  color: #2563eb;
+  font-variant-numeric: tabular-nums;
+}
+
+.display-preview {
+  max-height: 180px;
+  overflow: auto;
+  padding: 12px;
+  margin-top: 10px;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: #f8fbff;
+  color: #1f2937;
+  overflow-wrap: anywhere;
 }
 
 .btn-close {
@@ -620,5 +981,98 @@ function handleReset() {
   font-size: 12px;
   color: #f59e0b;
   margin-top: 6px;
+}
+
+.neutral-hint {
+  color: #64748b;
+}
+
+.template-snapshot {
+  padding: 10px 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 9px;
+  background: #f8fbff;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.template-snapshot > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.user-prompt-preview {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid #e2e8f0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.background-mode-group {
+  width: 100%;
+}
+
+.background-mode-group :deep(.el-radio-button) {
+  width: 33.333%;
+}
+
+.background-mode-group :deep(.el-radio-button__inner) {
+  width: 100%;
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+.shared-background-warning,
+.background-disabled-hint {
+  padding: 10px 12px;
+  border-radius: 9px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.shared-background-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  border: 1px solid #fde68a;
+  background: #fffbeb;
+  color: #b45309;
+}
+
+.background-disabled-hint {
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #64748b;
+}
+
+.save-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid #bbf7d0;
+  border-radius: 10px;
+  background: #f0fdf4;
+  color: #166534;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.save-status.dirty {
+  border-color: #fed7aa;
+  background: #fff7ed;
+  color: #c2410c;
+}
+
+.save-status div {
+  display: flex;
+  flex-direction: column;
+}
+
+.save-status strong {
+  font-size: 13px;
 }
 </style>
