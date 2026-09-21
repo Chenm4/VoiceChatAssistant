@@ -50,6 +50,12 @@ OPENAI_CONFIG = [
         "api_key": "local",
         "models": ["qwen2.5:latest"],
         "base_url": "http://localhost:11434/v1"
+    },
+    {
+        "name": "openrouter",
+        "api_key": os.getenv("OPENROUTER_API_KEY", ""),
+        "models": ["~openai/gpt-sol-latest", "~openai/gpt-terra-latest"],
+        "base_url": "https://openrouter.ai/api/v1"
     }
 ]
 
