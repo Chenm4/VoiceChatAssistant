@@ -4,6 +4,7 @@
 
 import MarkdownIt from 'markdown-it'
 import hljs from 'highlight.js'
+import { copyText } from './clipboard'
 
 const md = new MarkdownIt({
   html: true,
@@ -48,12 +49,13 @@ export function renderMarkdown(content) {
  * 复制代码到剪贴板
  * 这个函数会被添加到 window 对象，供 HTML 中的按钮调用
  */
-window.copyCode = function(event) {
+window.copyCode = async function(event) {
   const button = event.currentTarget
   const codeBlock = button.parentElement.querySelector('code')
   const text = codeBlock.textContent
   
-  navigator.clipboard.writeText(text).then(() => {
+  try {
+    await copyText(text)
     const originalHTML = button.innerHTML
     button.innerHTML = '<i class="fas fa-check"></i>'
     button.style.color = '#10b981'
@@ -61,9 +63,9 @@ window.copyCode = function(event) {
       button.innerHTML = originalHTML
       button.style.color = ''
     }, 1500)
-  }).catch(err => {
-    console.error('复制失败:', err)
-  })
+  } catch (error) {
+    console.error('复制失败:', error)
+  }
 }
 
 export default md

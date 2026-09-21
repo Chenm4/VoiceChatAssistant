@@ -7,6 +7,12 @@ from typing import Optional, List, Dict, Literal
 import time
 
 
+DEFAULT_SCREENSHOT_PROMPT = (
+    "请识别截图中的笔试题。回答时请在开头先简要、直接地给出最终答案，"
+    "然后再逐题说明简要思路；代码题请给出可运行代码并分析时间复杂度和空间复杂度。"
+)
+
+
 class ConfigSource(BaseModel):
     """单个 API 配置源"""
     name: str
@@ -43,16 +49,35 @@ class TokenUsage(BaseModel):
     total_tokens: int = 0
 
 
+class MessageAttachment(BaseModel):
+    """A locally stored attachment associated with a chat message."""
+    id: str
+    type: Literal["image"] = "image"
+    mime_type: str
+    filename: str
+    width: Optional[int] = None
+    height: Optional[int] = None
+    size: int = 0
+
+
+class ModelTarget(BaseModel):
+    """One model together with the API configuration source that serves it."""
+    source_name: str
+    model: str
+
+
 class ChatMessage(BaseModel):
     """
     聊天消息模型 - 树形结构
     支持多分支对话和并行响应
     """
+    model_config = {"protected_namespaces": ()}
     id: str  # 消息唯一标识 (UUID)
     parent_id: Optional[str] = None  # 父消息 ID
     role: str  # 'user', 'assistant', or 'system'
     content: str
     type: str = "text"  # 消息类型: text, image, etc.
+    attachments: List[MessageAttachment] = Field(default_factory=list)
     created_at: int = Field(default_factory=lambda: int(time.time()))
     children_ids: List[str] = Field(default_factory=list)  # 子消息 ID 列表
     
@@ -68,8 +93,12 @@ class ChatMessage(BaseModel):
 
 class SessionConfig(BaseModel):
     """会话配置"""
+    model_config = {"protected_namespaces": ()}
     source_name: Optional[str] = None
     models: List[str] = Field(default_factory=list)
+    # New format: supports selecting models from multiple API sources.
+    # source_name/models remain readable for existing saved sessions.
+    model_targets: List[ModelTarget] = Field(default_factory=list)
     temperature: float = 0.7
     top_p: float = 1.0
     system_prompt: Optional[str] = None
@@ -85,6 +114,12 @@ class SessionConfig(BaseModel):
     max_history_turns: Optional[int] = Field(default=None, ge=1, le=100)
     max_history_chars: Optional[int] = Field(default=None, ge=1000, le=200000)
     include_assistant_history: Optional[bool] = None
+    # 截图答题时使用的会话级基础指令；输入框文字会作为补充要求附加。
+    screenshot_prompt: str = Field(
+        default=DEFAULT_SCREENSHOT_PROMPT,
+        min_length=1,
+        max_length=4000,
+    )
     # 当前会话的消息阅读样式。
     display_font_size: int = Field(default=16, ge=12, le=72)
     display_line_height: float = Field(default=1.7, ge=1.0, le=3.0)
@@ -94,6 +129,8 @@ class ChatRequest(BaseModel):
     """聊天请求模型"""
     message: str
     parent_id: Optional[str] = None  # 从哪条消息继续对话
+    session_id: Optional[str] = None
+    attachment_ids: List[str] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
@@ -119,6 +156,8 @@ class Session(BaseModel):
     updated_at: int  # Unix 时间戳
     system_prompt: Optional[str] = None  # 全局系统提示词
     messages: List[ChatMessage] = Field(default_factory=list)
+    # WAV filenames captured while this session was active, in recording order.
+    audio_files: List[str] = Field(default_factory=list)
     session_config: Optional[SessionConfig] = None
     storage_path: Optional[str] = None  # 存储路径
 
@@ -131,6 +170,7 @@ class SessionIndex(BaseModel):
     updated_at: int
     storage_path: str
     message_count: int = 0
+    audio_count: int = 0
     used_models: List[str] = Field(default_factory=list)  # 该会话使用过的模型列表
 
 

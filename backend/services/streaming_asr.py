@@ -81,6 +81,7 @@ class StreamingASR:
         self.audio_buffer: list = []
         self.preloaded: bool = preload
         self.recording_start_time: Optional[float] = None  # 录音开始时间
+        self.saved_audio_file: Optional[str] = None
         self.max_duration_seconds: int = AUDIO_CONFIG.get('max_duration_minutes', 5) * 60  # 最大录音时长（秒）
         self.auto_stopped: bool = False  # 是否因超时自动停止
         self.provider: str = ASR_CONFIG.get('provider', 'soniox').lower()
@@ -520,6 +521,7 @@ class StreamingASR:
             self.logger.info("💾 [保存录音] 正在保存录音文件...")
             saved_file = self._save_wav_file()
             if saved_file:
+                self.saved_audio_file = saved_file
                 self.logger.info(f"✅ [录音已保存] 路径: {saved_file}")
             
             # 3. 等待队列处理完成（最多等待3秒）

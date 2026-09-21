@@ -1,6 +1,11 @@
 <template>
   <div class="input-area">
     <div class="input-wrapper">
+      <div v-if="captureConnected" class="capture-status">
+        <span class="capture-dot"></span>
+        <span class="capture-label" :title="captureSourceName">正在捕获：{{ captureSourceName || '已选择标签页' }}</span>
+        <button class="capture-reset" type="button" @click="$emit('reset-capture')">更换标签页</button>
+      </div>
       <div class="input-container" :class="{ focused: isFocused }">
         <div class="textarea-wrapper">
           <textarea 
@@ -17,6 +22,7 @@
             class="input-textarea"
           ></textarea>
         </div>
+        <span class="capture-anchor-space" aria-hidden="true"></span>
         <button 
           @click="$emit('send')"
           :disabled="!isSending && !modelValue.trim()"
@@ -49,10 +55,18 @@ const props = defineProps({
   isSending: {
     type: Boolean,
     default: false
+  },
+  captureConnected: {
+    type: Boolean,
+    default: false
+  },
+  captureSourceName: {
+    type: String,
+    default: ''
   }
 })
 
-const emit = defineEmits(['update:modelValue', 'send'])
+const emit = defineEmits(['update:modelValue', 'send', 'reset-capture'])
 
 const textarea = ref(null)
 const isFocused = ref(false)
@@ -129,6 +143,41 @@ watch(() => props.modelValue, () => {
   padding: 0 20px;
 }
 
+.capture-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 24px;
+  padding: 0 10px 6px;
+  color: #475569;
+  font-size: 12px;
+}
+
+.capture-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, .14);
+}
+
+.capture-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capture-reset {
+  border: 0;
+  padding: 1px 4px;
+  background: transparent;
+  color: #2563eb;
+  cursor: pointer;
+  font-size: 12px;
+}
+
 .input-container {
   display: flex;
   gap: 10px;
@@ -198,6 +247,14 @@ watch(() => props.modelValue, () => {
   transition: transform .18s ease, background .18s ease, color .18s ease, box-shadow .18s ease;
   flex-shrink: 0;
   align-self: flex-end;
+}
+
+.capture-anchor-space {
+  width: 38px;
+  height: 38px;
+  min-width: 38px;
+  margin: 2px 0 2px 2px;
+  flex: 0 0 38px;
 }
 
 .send-icon {

@@ -59,7 +59,10 @@
               <div class="session-title">{{ session.title }}</div>
               <div class="session-meta">
                 <span class="message-count">
-                  {{ session.messages?.length || 0 }} 条消息
+                  {{ session.message_count ?? session.messages?.length ?? 0 }} 条消息
+                </span>
+                <span v-if="getAudioCount(session) > 0" class="audio-count">
+                  {{ getAudioCount(session) }} 段录音
                 </span>
                 <span class="time">{{ formatTime(session.updated_at) }}</span>
               </div>
@@ -74,6 +77,32 @@
               size="small"
               title="重命名"
             />
+            <el-dropdown
+              trigger="click"
+              @command="handleSessionAction(session.id, $event)"
+            >
+              <el-button
+                text
+                :icon="MoreFilled"
+                size="small"
+                title="会话导出"
+                aria-label="会话导出"
+              />
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="copy-user">复制全部发送消息</el-dropdown-item>
+                  <el-dropdown-item command="copy-assistant">复制全部返回消息</el-dropdown-item>
+                  <el-dropdown-item command="copy-all">复制全部消息</el-dropdown-item>
+                  <el-dropdown-item
+                    command="merge-audio"
+                    divided
+                    :disabled="getAudioCount(session) === 0"
+                  >
+                    合并并下载录音{{ getAudioCount(session) ? ` (${getAudioCount(session)})` : '' }}
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
             <el-button 
               text
               @click="handleDeleteSession(session.id)" 
@@ -114,7 +143,7 @@
 <script setup>
 import { ref, nextTick, computed } from 'vue'
 import { ElMessageBox } from 'element-plus'
-import { Plus, Edit, Delete, Setting } from '@element-plus/icons-vue'
+import { Plus, Edit, Delete, Setting, MoreFilled } from '@element-plus/icons-vue'
 
 const props = defineProps({
   sessions: {
@@ -132,7 +161,9 @@ const emit = defineEmits([
   'switch-session',
   'delete-session',
   'update-title',
-  'open-settings'
+  'open-settings',
+  'copy-session',
+  'merge-session-audio'
 ])
 
 const isCollapsed = ref(false)
@@ -151,6 +182,18 @@ function handleCreateSession() {
 function handleSwitchSession(sessionId) {
   if (editingSessionId.value) return
   emit('switch-session', sessionId)
+}
+
+function getAudioCount(session) {
+  return session.audio_count ?? session.audio_files?.length ?? 0
+}
+
+function handleSessionAction(sessionId, command) {
+  if (command === 'merge-audio') {
+    emit('merge-session-audio', sessionId)
+    return
+  }
+  emit('copy-session', sessionId, command)
 }
 
 function handleEditTitle(sessionId, currentTitle) {
@@ -352,6 +395,10 @@ function formatTime(timestamp) {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.audio-count {
+  white-space: nowrap;
 }
 
 .session-title-edit {

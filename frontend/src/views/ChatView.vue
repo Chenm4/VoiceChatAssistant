@@ -9,6 +9,8 @@
       @switch-session="handleSwitchSession"
       @delete-session="handleDeleteSession"
       @update-title="handleUpdateTitle"
+      @copy-session="handleCopySession"
+      @merge-session-audio="handleMergeSessionAudio"
     />
     
     <!-- 主内容区 -->
@@ -25,7 +27,17 @@
       <InputArea
         v-model="inputMessage"
         :is-sending="isSending"
+        :capture-connected="captureConnected"
+        :capture-source-name="captureSourceName"
         @send="handleSendMessage"
+        @reset-capture="handleResetCapture"
+      />
+
+      <CaptureButton
+        :connected="captureConnected"
+        :loading="isCapturing"
+        :disabled="isSending || isCapturing"
+        @capture="handleCaptureAndSend"
       />
 
       <!-- 主聊天区域 -->
@@ -77,13 +89,27 @@ import { ElMessageBox } from 'element-plus'
 import NavBar from '../components/NavBar.vue'
 import MessageList from '../components/MessageList.vue'
 import InputArea from '../components/InputArea.vue'
+import CaptureButton from '../components/CaptureButton.vue'
 import VoiceButton from '../components/VoiceButton.vue'
 import SettingsModal from '../components/SettingsModal.vue'
 import SessionSidebar from '../components/SessionSidebar.vue'
 import SessionSettingsSidebar from '../components/SessionSettingsSidebar.vue'
 import api from '../utils/api'
+import { copyText } from '../utils/clipboard'
+import { TabScreenCapture } from '../utils/screenCapture'
 
 defineEmits(['open-prompt-lab'])
+
+const DEFAULT_SCREENSHOT_PROMPT = '请识别截图中的笔试题。回答时请在开头先简要、直接地给出最终答案，然后再逐题说明简要思路；代码题请给出可运行代码并分析时间复杂度和空间复杂度。'
+
+function normalizeStreamTargets(data) {
+  if (Array.isArray(data.targets) && data.targets.length > 0) return data.targets
+  return (data.models || []).map(model => ({
+    key: model,
+    model,
+    source_name: model.includes('/') ? model.split('/')[0] : 'unknown'
+  }))
+}
 
 // 状态
 const messages = ref([])
@@ -96,6 +122,10 @@ const showSessionSettings = ref(false)
 const messageListRef = ref(null)
 const audioStream = ref(null)
 const abortController = ref(null) // 用于取消请求
+const captureConnected = ref(false)
+const captureSourceName = ref('')
+const isCapturing = ref(false)
+let tabCapture = null
 
 // 会话管理状态
 const sessions = ref([])
@@ -183,7 +213,9 @@ function stopCurrentResponse() {
 }
 
 // 发送消息
-async function handleSendMessage() {
+async function handleSendMessage(options = {}) {
+  const attachments = Array.isArray(options?.attachments) ? options.attachments : []
+  const fallbackMessage = options?.fallbackMessage || ''
   // 如果正在发送
   if (isSending.value) {
     // 如果输入框有新内容，先打断再发送新消息
@@ -202,15 +234,17 @@ async function handleSendMessage() {
     }
   }
   
-  if (!inputMessage.value.trim()) return
+  if (!inputMessage.value.trim() && attachments.length === 0) return
   
-  const message = inputMessage.value.trim()
+  const message = inputMessage.value.trim() || fallbackMessage
+  if (!message) return
   inputMessage.value = ''
   
   // 添加用户消息
   messages.value.push({
     role: 'user',
     content: message,
+    attachments,
     time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
   })
   
@@ -242,7 +276,11 @@ async function handleSendMessage() {
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({
+        message,
+        session_id: currentSessionId.value,
+        attachment_ids: attachments.map(attachment => attachment.id)
+      }),
       signal: abortController.value.signal
     })
     
@@ -306,21 +344,18 @@ async function handleSendMessage() {
           }
           
           // 为每个模型创建子消息对象
-          data.models.forEach((model, index) => {
-            // 从模型名称中提取 provider（如 "google/gemini-2.5-flash" -> "google"）
-            let provider = 'unknown'
-            if (model.includes('/')) {
-              provider = model.split('/')[0]
-            }
-            
+          normalizeStreamTargets(data).forEach((target, index) => {
             const msgObj = {
               content: '',
               model_info: {
-                name: model,
-                provider: provider
+                id: target.key,
+                name: target.model,
+                provider: target.source_name
               },
               model_index: index,
-              model: model  // 添加 model 字段
+              model: target.model,
+              model_key: target.key,
+              source_name: target.source_name
             }
             multiModelMsg.models.push(msgObj)
             modelMessages.push(msgObj)
@@ -363,7 +398,8 @@ async function handleSendMessage() {
           
         } else if (data.type === 'model_error') {
           console.error('❌ 模型错误:', data.model, data.message)
-          showNotification(`模型 ${data.model} 错误: ${data.message}`, 'error')
+          const modelLabel = data.source_name ? `${data.source_name} · ${data.model}` : data.model
+          showNotification(`模型 ${modelLabel} 错误: ${data.message}`, 'error')
           
         } else if (data.type === 'error') {
           console.error('❌ 收到错误:', data.message)
@@ -455,6 +491,104 @@ async function handleSendMessage() {
   }
 }
 
+function ensureTabCapture() {
+  if (!tabCapture) {
+    tabCapture = new TabScreenCapture(() => {
+      captureConnected.value = false
+      captureSourceName.value = ''
+      showNotification('标签页共享已停止', 'info')
+    })
+  }
+  return tabCapture
+}
+
+async function selectCaptureTab() {
+  const capture = ensureTabCapture()
+  const label = await capture.selectTab()
+  captureConnected.value = true
+  captureSourceName.value = label
+}
+
+async function uploadScreenshot(frame) {
+  if (!currentSessionId.value) {
+    throw new Error('当前没有可用会话')
+  }
+  const formData = new FormData()
+  formData.append('session_id', currentSessionId.value)
+  formData.append('width', String(frame.width))
+  formData.append('height', String(frame.height))
+  formData.append('screenshot', frame.blob, `capture-${Date.now()}.webp`)
+  const response = await fetch('/api/attachments/screenshots', {
+    method: 'POST',
+    body: formData
+  })
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}))
+    if (response.status === 405) {
+      throw new Error('截图接口尚未加载，请重启后端服务后重试')
+    }
+    throw new Error(data.detail || `截图上传失败 (${response.status})`)
+  }
+  return response.json()
+}
+
+async function handleCaptureAndSend() {
+  if (isSending.value || isCapturing.value) {
+    showNotification('正在生成回答，请稍候或先停止生成', 'warning')
+    return
+  }
+
+  isCapturing.value = true
+  try {
+    const capture = ensureTabCapture()
+    if (!capture.connected) {
+      await selectCaptureTab()
+    }
+    const frame = await capture.capture()
+    const attachment = await uploadScreenshot(frame)
+    captureConnected.value = true
+    captureSourceName.value = capture.label
+    const screenshotPrompt = currentSession.value?.session_config?.screenshot_prompt?.trim()
+      || DEFAULT_SCREENSHOT_PROMPT
+    const extraRequirement = inputMessage.value.trim()
+    inputMessage.value = extraRequirement
+      ? `${screenshotPrompt}\n\n用户补充要求：${extraRequirement}`
+      : screenshotPrompt
+    await handleSendMessage({
+      attachments: [attachment]
+    })
+  } catch (error) {
+    if (error?.name === 'NotAllowedError') {
+      showNotification('未获得标签页共享权限', 'warning')
+    } else {
+      console.error('截图答题失败:', error)
+      showNotification(error.message || '截图答题失败', 'error', 5000)
+    }
+    captureConnected.value = Boolean(tabCapture?.connected)
+    if (!captureConnected.value) captureSourceName.value = ''
+  } finally {
+    isCapturing.value = false
+  }
+}
+
+async function handleResetCapture() {
+  if (isCapturing.value || isSending.value) return
+  ensureTabCapture().stop()
+  captureConnected.value = false
+  captureSourceName.value = ''
+  isCapturing.value = true
+  try {
+    await selectCaptureTab()
+    showNotification('已更换截图标签页', 'success')
+  } catch (error) {
+    if (error?.name !== 'NotAllowedError') {
+      showNotification(error.message || '选择标签页失败', 'error')
+    }
+  } finally {
+    isCapturing.value = false
+  }
+}
+
 // 语音录音防抖标志
 let isProcessingRecording = false
 // 记录开始录音时的会话ID，确保停止时发送到正确的会话
@@ -526,6 +660,7 @@ async function handleStopRecording({ sendMessage = true } = {}) {
     const apiStartTime = Date.now()
     
     const data = await api.post('/recording/stop')
+    await loadSessions()
     
     const apiEndTime = Date.now()
     const apiDuration = apiEndTime - apiStartTime
@@ -803,6 +938,93 @@ async function handleUpdateTitle(sessionId, newTitle) {
   }
 }
 
+function formatAssistantMessages(message, responseNumber) {
+  const parallel = message.parallel_models || message.models
+  if (Array.isArray(parallel) && parallel.length > 0) {
+    return parallel
+      .filter(item => item?.content)
+      .map(item => {
+        const model = item.model_info?.name || item.model || '模型'
+        const source = item.model_info?.provider || item.source_name
+        const label = source && source !== 'unknown' ? `${source} · ${model}` : model
+        return `【返回 ${responseNumber} · ${label}】\n${item.content}`
+      })
+  }
+
+  const model = message.model_info?.name
+  const source = message.model_info?.provider
+  const modelLabel = model && source && source !== 'unknown' ? `${source} · ${model}` : model
+  const label = modelLabel ? `【返回 ${responseNumber} · ${modelLabel}】` : `【返回 ${responseNumber}】`
+  return message.content ? [`${label}\n${message.content}`] : []
+}
+
+function buildSessionCopyText(session, command) {
+  const sections = []
+  let sentNumber = 0
+  let responseNumber = 0
+
+  for (const message of session.messages || []) {
+    if (message.role === 'user') {
+      sentNumber += 1
+      if (command !== 'copy-assistant' && message.content) {
+        sections.push(`【发送 ${sentNumber}】\n${message.content}`)
+      }
+    } else if (message.role === 'assistant') {
+      responseNumber += 1
+      if (command !== 'copy-user') {
+        sections.push(...formatAssistantMessages(message, responseNumber))
+      }
+    }
+  }
+
+  return sections.join('\n\n')
+}
+
+async function handleCopySession(sessionId, command) {
+  try {
+    const session = await api.get(`/sessions/${sessionId}`)
+    const text = buildSessionCopyText(session, command)
+    if (!text) {
+      showNotification('该会话没有可复制的对应消息', 'warning')
+      return
+    }
+    await copyText(text)
+    const labels = {
+      'copy-user': '发送消息',
+      'copy-assistant': '返回消息',
+      'copy-all': '全部消息'
+    }
+    showNotification(`已复制该会话的${labels[command] || '消息'}`, 'success')
+  } catch (error) {
+    console.error('复制会话失败:', error)
+    showNotification('复制失败: ' + (error.response?.data?.detail || error.message), 'error')
+  }
+}
+
+async function handleMergeSessionAudio(sessionId) {
+  try {
+    const response = await fetch(`/api/sessions/${sessionId}/audio/merged`)
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}))
+      throw new Error(errorData.detail || '合并录音失败')
+    }
+
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `session-${sessionId}-audio.wav`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    showNotification('录音已按录制顺序合并并下载', 'success')
+  } catch (error) {
+    console.error('合并录音失败:', error)
+    showNotification(error.message || '合并录音失败', 'error')
+  }
+}
+
 // 消息更新后重新加载
 async function handleMessageUpdated() {
   if (currentSessionId.value) {
@@ -924,21 +1146,18 @@ async function handleRegenerateMessage({ messageId, newContent }) {
           }
           
           // 为每个模型创建子消息对象
-          data.models.forEach((model, index) => {
-            // 从模型名称中提取 provider（如 "google/gemini-2.5-flash" -> "google"）
-            let provider = 'unknown'
-            if (model.includes('/')) {
-              provider = model.split('/')[0]
-            }
-            
+          normalizeStreamTargets(data).forEach((target, index) => {
             const msgObj = {
               content: '',
               model_info: {
-                name: model,
-                provider: provider
+                id: target.key,
+                name: target.model,
+                provider: target.source_name
               },
               model_index: index,
-              model: model  // 添加 model 字段
+              model: target.model,
+              model_key: target.key,
+              source_name: target.source_name
             }
             multiModelMsg.models.push(msgObj)
             modelMessages.push(msgObj)
@@ -984,7 +1203,8 @@ async function handleRegenerateMessage({ messageId, newContent }) {
           
         } else if (data.type === 'model_error') {
           console.error('❌ 模型错误:', data.model, data.message)
-          showNotification(`模型 ${data.model} 错误: ${data.message}`, 'error')
+          const modelLabel = data.source_name ? `${data.source_name} · ${data.model}` : data.model
+          showNotification(`模型 ${modelLabel} 错误: ${data.message}`, 'error')
           
         } else if (data.type === 'error') {
           console.error('❌ 收到错误:', data.message)
@@ -1214,6 +1434,9 @@ onUnmounted(() => {
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   window.removeEventListener('beforeunload', handleBeforeUnload)
   window.removeEventListener('popstate', handlePopState)
+
+  tabCapture?.stop()
+  tabCapture = null
   
   // 停止状态轮询
   if (recordingStatusInterval) {

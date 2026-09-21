@@ -62,7 +62,7 @@ class SessionChatLogger:
         with open(self.log_file, 'a', encoding='utf-8') as f:
             f.write(content)
     
-    def _truncate_text(self, text: str, max_length: int = 10) -> str:
+    def _truncate_text(self, text: Any, max_length: int = 10) -> str:
         """截断文本到指定长度
         
         Args:
@@ -72,9 +72,24 @@ class SessionChatLogger:
         Returns:
             str: 截断后的文本
         """
+        if isinstance(text, list):
+            text_parts = [
+                str(part.get("text", ""))
+                for part in text
+                if isinstance(part, dict) and part.get("type") == "text"
+            ]
+            image_count = sum(
+                1 for part in text
+                if isinstance(part, dict) and part.get("type") == "image_url"
+            )
+            text = " ".join(text_parts)
+            suffix = f" [图片 {image_count} 张]" if image_count else ""
+        else:
+            text = str(text or "")
+            suffix = ""
         if len(text) <= max_length:
-            return text
-        return text[:max_length] + "..."
+            return text + suffix
+        return text[:max_length] + "..." + suffix
     
     def log_model_interaction(
         self,

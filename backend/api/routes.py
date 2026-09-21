@@ -3,14 +3,18 @@ API 路由定义
 """
 
 import asyncio
+import base64
+import io
 import json
 import os
 import re
 import sys
+import uuid
+import wave
 from pathlib import Path
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 # 添加项目根目录到路径
@@ -33,6 +37,7 @@ from backend.api.models import (
     BatchDeleteRequest,
     RegenerateMessageRequest,
     ModelInfo,
+    MessageAttachment,
     TokenUsage
 )
 from backend.services.audio_recorder import AudioRecorder
@@ -77,6 +82,49 @@ except ImportError:
     }
 
 logger = get_api_logger()
+VOICE_DIR = Path(__file__).parent.parent.parent / "data" / "voices"
+SCREENSHOT_DIR = Path(__file__).parent.parent.parent / "data" / "screenshots"
+MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024
+SCREENSHOT_MIME_EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+}
+
+
+def _content_text_length(content: Any) -> int:
+    """Count textual request content without expanding image data URLs in logs."""
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        return sum(
+            len(str(part.get("text", "")))
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return 0
+
+
+def _content_log_preview(content: Any, preview_chars: int, show_full: bool) -> str:
+    if isinstance(content, list):
+        text_parts = [
+            str(part.get("text", ""))
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        image_count = sum(
+            1 for part in content
+            if isinstance(part, dict) and part.get("type") == "image_url"
+        )
+        content = " ".join(text_parts)
+        image_suffix = f" [images={image_count}]" if image_count else ""
+    else:
+        content = str(content or "")
+        image_suffix = ""
+    shown = content if show_full else content[:preview_chars]
+    if not show_full and len(content) > preview_chars:
+        shown += "..."
+    return shown.replace("\n", "\\n") + image_suffix
 
 
 def log_model_request_context(
@@ -95,7 +143,7 @@ def log_model_request_context(
     if not CHAT_CONTEXT_CONFIG.get("debug_context", True):
         return
 
-    total_chars = sum(len(str(message.get("content", ""))) for message in messages)
+    total_chars = sum(_content_text_length(message.get("content", "")) for message in messages)
     user_count = sum(1 for message in messages if message.get("role") == "user")
     assistant_count = sum(1 for message in messages if message.get("role") == "assistant")
     system_count = sum(1 for message in messages if message.get("role") == "system")
@@ -115,12 +163,12 @@ def log_model_request_context(
     show_full = CHAT_CONTEXT_CONFIG.get("debug_context_full", False)
     for index, message in enumerate(messages, 1):
         role = message.get("role", "unknown")
-        content = str(message.get("content", ""))
-        shown = content if show_full else content[:preview_chars]
-        shown = shown.replace("\n", "\\n")
-        if not show_full and len(content) > preview_chars:
-            shown += "..."
-        logger.info(f"   [{label}] {index:02d} role={role}, chars={len(content)}: {shown}")
+        content = message.get("content", "")
+        shown = _content_log_preview(content, preview_chars, show_full)
+        logger.info(
+            f"   [{label}] {index:02d} role={role}, "
+            f"chars={_content_text_length(content)}: {shown}"
+        )
 
 
 def resolve_chat_context_config(session_config: Optional[SessionConfig]) -> Dict[str, Any]:
@@ -314,6 +362,83 @@ def get_chat_completion_extra_params(source: Optional[ConfigSource], model: str)
     
     return {}
 
+
+def resolve_model_targets(
+    session_config: Optional[SessionConfig],
+    requested_model: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Resolve every selected model to its own API source and credentials."""
+    requested_targets = []
+    if requested_model:
+        if "::" in requested_model:
+            requested_source, model_name = requested_model.split("::", 1)
+            requested_targets = [(requested_source, model_name)]
+        else:
+            matching_source = next(
+                (source for source in config_sources if requested_model in source.models),
+                None,
+            )
+            if not matching_source:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"找不到模型 {requested_model} 对应的配置源",
+                )
+            requested_targets = [(matching_source.name, requested_model)]
+    elif session_config and session_config.model_targets:
+        requested_targets = [
+            (target.source_name, target.model)
+            for target in session_config.model_targets
+        ]
+    elif session_config and session_config.models:
+        legacy_source = session_config.source_name or current_config.current_source
+        requested_targets = [
+            (legacy_source, model_name) for model_name in session_config.models
+        ]
+    else:
+        requested_targets = [(current_config.current_source, api_config.model)]
+
+    resolved = []
+    seen = set()
+    for source_name, model_name in requested_targets:
+        key = f"{source_name}::{model_name}"
+        if key in seen:
+            continue
+        source = next((item for item in config_sources if item.name == source_name), None)
+        if not source:
+            raise HTTPException(status_code=400, detail=f"配置源 {source_name} 不存在")
+        if model_name not in source.models:
+            raise HTTPException(
+                status_code=400,
+                detail=f"模型 {model_name} 不属于配置源 {source_name}",
+            )
+        if not source.api_key:
+            raise HTTPException(
+                status_code=400,
+                detail=f"请先配置 {source_name} 的 API Key",
+            )
+        seen.add(key)
+        resolved.append({
+            "key": key,
+            "source_name": source_name,
+            "model": model_name,
+            "source": source,
+        })
+
+    if not resolved:
+        raise HTTPException(status_code=400, detail="请至少选择一个模型")
+    return resolved
+
+
+def public_model_targets(targets: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    return [
+        {
+            "key": target["key"],
+            "source_name": target["source_name"],
+            "model": target["model"],
+        }
+        for target in targets
+    ]
+
 # ==================== 会话管理全局状态 ====================
 # 使用新的存储架构：按月分组存储，索引与内容分离
 current_session_id: str = None  # 当前活动的会话 ID
@@ -414,6 +539,132 @@ def save_current_session():
     if current_session_cache:
         session_storage.save_session(current_session_cache)
         logger.debug(f"保存会话: {current_session_cache.id}")
+
+
+def _screenshot_session_dir(session_id: str) -> Path:
+    """Return the private screenshot directory for one validated session id."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
+        raise HTTPException(status_code=400, detail="无效的会话 ID")
+    directory = SCREENSHOT_DIR / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _find_screenshot(session_id: str, attachment_id: str) -> Path:
+    if not re.fullmatch(r"[a-f0-9]{24}", attachment_id):
+        raise HTTPException(status_code=404, detail="截图不存在")
+    directory = _screenshot_session_dir(session_id)
+    matches = [path for path in directory.glob(f"{attachment_id}.*") if path.is_file()]
+    if len(matches) != 1:
+        raise HTTPException(status_code=404, detail="截图不存在")
+    return matches[0]
+
+
+def _delete_screenshot_files(
+    session_id: str,
+    attachment_ids: Optional[List[str]] = None,
+) -> None:
+    """Delete only screenshot files inside one validated session directory."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
+        return
+    directory = SCREENSHOT_DIR / session_id
+    if not directory.is_dir():
+        return
+    allowed_ids = set(attachment_ids) if attachment_ids is not None else None
+    for path in directory.iterdir():
+        if path.is_file() and (allowed_ids is None or path.stem in allowed_ids):
+            path.unlink()
+    try:
+        directory.rmdir()
+    except OSError:
+        pass
+
+
+def _detect_screenshot_mime(data: bytes) -> Optional[str]:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _load_message_attachments(
+    session_id: str,
+    attachment_ids: List[str],
+) -> List[MessageAttachment]:
+    attachments = []
+    for attachment_id in attachment_ids:
+        path = _find_screenshot(session_id, attachment_id)
+        mime_type = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+        }.get(path.suffix.lower())
+        if not mime_type:
+            raise HTTPException(status_code=400, detail="不支持的截图格式")
+        attachments.append(MessageAttachment(
+            id=attachment_id,
+            mime_type=mime_type,
+            filename=path.name,
+            size=path.stat().st_size,
+        ))
+    return attachments
+
+
+def _multimodal_user_content(
+    session_id: str,
+    text: str,
+    attachments: List[MessageAttachment],
+) -> Any:
+    """Build OpenAI-compatible text and image content parts."""
+    if not attachments:
+        return text
+    parts: List[Dict[str, Any]] = [{"type": "text", "text": text}]
+    for attachment in attachments:
+        path = _find_screenshot(session_id, attachment.id)
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        parts.append({
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:{attachment.mime_type};base64,{encoded}",
+            },
+        })
+    return parts
+
+
+def attach_recording_to_session(session_id: Optional[str], audio_file: Optional[str]) -> None:
+    """Persist the generated WAV filename on the session that started recording."""
+    global current_session_cache
+
+    if not session_id or not audio_file:
+        return
+
+    audio_path = Path(audio_file).resolve()
+    try:
+        audio_path.relative_to(VOICE_DIR.resolve())
+    except ValueError:
+        logger.warning(f"忽略 voices 目录之外的录音文件: {audio_path}")
+        return
+
+    session = (
+        current_session_cache
+        if current_session_cache and current_session_cache.id == session_id
+        else session_storage.load_session(session_id)
+    )
+    if not session:
+        logger.warning(f"录音对应的会话不存在: {session_id}")
+        return
+
+    if audio_path.name not in session.audio_files:
+        session.audio_files.append(audio_path.name)
+        session.updated_at = int(time.time())
+        session_storage.save_session(session)
+        if session_id == current_session_id:
+            current_session_cache = session
+        logger.info(f"录音已关联到会话: session={session_id}, file={audio_path.name}")
 
 
 def get_conversation_history() -> List[ChatMessage]:
@@ -687,8 +938,13 @@ async def start_recording():
         # 如果已经有正在进行的录音，先清理
         if streaming_asr:
             logger.warning("⚠️ [清理旧实例] 检测到旧的录音实例，先清理...")
+            previous_asr = streaming_asr
             try:
-                await streaming_asr.stop_streaming()
+                await previous_asr.stop_streaming()
+                attach_recording_to_session(
+                    getattr(previous_asr, "session_id", None),
+                    previous_asr.saved_audio_file,
+                )
             except:
                 pass
             streaming_asr = None
@@ -705,6 +961,9 @@ async def start_recording():
             # 创建新的实时流式识别实例
             logger.info("🔧 [创建实例] 创建新的 StreamingASR 实例...")
             temp_asr = StreamingASR()
+
+        # Capture ownership now so later session switches cannot reassign audio.
+        temp_asr.session_id = current_session_id
         
         # 启动实时识别（作为后台任务）
         logger.info("🚀 [启动任务] 启动实时识别任务（录音将立即开始）...")
@@ -742,6 +1001,10 @@ async def start_recording():
         if temp_asr:
             try:
                 await temp_asr.stop_streaming()
+                attach_recording_to_session(
+                    getattr(temp_asr, "session_id", None),
+                    temp_asr.saved_audio_file,
+                )
             except:
                 pass
         # 注意：这里不设置 streaming_asr = None，保持原有状态
@@ -798,6 +1061,10 @@ async def stop_recording():
         stop_start = time.time()
         
         text, error_msg = await current_asr.stop_streaming()
+        attach_recording_to_session(
+            getattr(current_asr, "session_id", None),
+            current_asr.saved_audio_file,
+        )
         
         stop_elapsed = (time.time() - stop_start) * 1000
         total_elapsed = (time.time() - request_start_time) * 1000
@@ -818,6 +1085,59 @@ async def stop_recording():
         return RecordingResponse(success=False, message=f"录音处理异常: {str(e)}")
 
 
+@router.post("/attachments/screenshots")
+async def upload_screenshot(
+    session_id: str = Form(...),
+    width: Optional[int] = Form(None),
+    height: Optional[int] = Form(None),
+    screenshot: UploadFile = File(...),
+):
+    """Validate and store a browser-tab screenshot for a chat message."""
+    if not session_storage.load_session(session_id):
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    data = await screenshot.read(MAX_SCREENSHOT_BYTES + 1)
+    await screenshot.close()
+    if not data:
+        raise HTTPException(status_code=400, detail="截图内容为空")
+    if len(data) > MAX_SCREENSHOT_BYTES:
+        raise HTTPException(status_code=413, detail="截图不能超过 8MB")
+
+    detected_mime = _detect_screenshot_mime(data)
+    if detected_mime not in SCREENSHOT_MIME_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="仅支持 PNG、JPEG 或 WebP 截图")
+
+    attachment_id = uuid.uuid4().hex[:24]
+    filename = attachment_id + SCREENSHOT_MIME_EXTENSIONS[detected_mime]
+    path = _screenshot_session_dir(session_id) / filename
+    path.write_bytes(data)
+
+    attachment = MessageAttachment(
+        id=attachment_id,
+        mime_type=detected_mime,
+        filename=filename,
+        width=width if width and width > 0 else None,
+        height=height if height and height > 0 else None,
+        size=len(data),
+    )
+    return attachment.dict()
+
+
+@router.get("/attachments/{session_id}/{attachment_id}")
+async def get_screenshot(session_id: str, attachment_id: str):
+    """Serve a screenshot that belongs to a local chat session."""
+    if not session_storage.load_session(session_id):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    path = _find_screenshot(session_id, attachment_id)
+    media_type = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+    }.get(path.suffix.lower(), "application/octet-stream")
+    return FileResponse(path, media_type=media_type)
+
+
 @router.post("/chat")
 async def chat(request: ChatRequest):
     """发送消息（流式返回）- 支持树形对话和并行响应"""
@@ -826,29 +1146,23 @@ async def chat(request: ChatRequest):
     
     logger.info(f"收到聊天请求: {request.message[:50]}...")
     
-    # 获取当前会话
-    current_session = get_current_session()
-    session_config = current_session.session_config
-    
-    if session_config and session_config.models and len(session_config.models) > 0:
-        models_to_use = session_config.models
-        source_name = session_config.source_name or current_config.current_source
-        source_to_use = next((s for s in config_sources if s.name == source_name), None)
+    # Explicit session ownership prevents a tab capture from landing in a
+    # different session if the user switches conversations while uploading.
+    if request.session_id:
+        current_session = session_storage.load_session(request.session_id)
+        if not current_session:
+            raise HTTPException(status_code=404, detail="会话不存在")
     else:
-        models_to_use = [api_config.model]
-        source_name = current_config.current_source
-        source_to_use = next((s for s in config_sources if s.name == source_name), None)
+        current_session = get_current_session()
+    session_config = current_session.session_config
+    message_attachments = _load_message_attachments(
+        current_session.id, request.attachment_ids
+    )
     
-    if not source_to_use:
-        logger.error(f"配置源不存在: source={source_name}, models={models_to_use}")
-        raise HTTPException(status_code=400, detail=f"配置源 {source_name} 不存在")
-    
-    if not source_to_use.api_key:
-        logger.error(f"API Key 未配置: source={source_to_use.name}, models={models_to_use}")
-        raise HTTPException(status_code=400, detail=f"请先配置 {source_to_use.name} 的 API Key")
+    model_targets = resolve_model_targets(session_config)
+    models_to_use = [target["model"] for target in model_targets]
     
     # 生成用户消息 ID
-    import uuid
     user_msg_id = f"msg_{uuid.uuid4().hex[:12]}"
     current_time = int(time.time())
     
@@ -858,7 +1172,8 @@ async def chat(request: ChatRequest):
         parent_id=request.parent_id,  # 从请求中获取父消息 ID
         role="user",
         content=request.message,
-        type="text",
+        type="image" if message_attachments else "text",
+        attachments=message_attachments,
         created_at=current_time,
         children_ids=[]
     )
@@ -881,7 +1196,10 @@ async def chat(request: ChatRequest):
 
     context_settings = resolve_chat_context_config(session_config)
     
-    def build_messages_for_model(target_model: str) -> List[Dict[str, str]]:
+    def build_messages_for_model(
+        target_model: str,
+        target_source_name: Optional[str] = None,
+    ) -> List[Dict[str, str]]:
         """
         为特定模型构建消息历史
         
@@ -922,12 +1240,30 @@ async def chat(request: ChatRequest):
                 if msg.is_parallel_response and msg.parallel_models:
                     # 并行响应：从 parallel_models 中找到当前模型的回复
                     for model_data in msg.parallel_models:
-                        if model_data.get('model') == target_model or model_data.get('model_info', {}).get('name') == target_model:
+                        model_info = model_data.get('model_info', {})
+                        same_model = (
+                            model_data.get('model') == target_model
+                            or model_info.get('name') == target_model
+                        )
+                        same_source = (
+                            not target_source_name
+                            or not model_info.get('provider')
+                            or model_info.get('provider') == target_source_name
+                        )
+                        if same_model and same_source:
                             assistant_content = model_data.get('content', '')
                             break
                 else:
                     # 单模型响应：检查是否是当前模型
-                    if msg.model_info and msg.model_info.name == target_model:
+                    if (
+                        msg.model_info
+                        and msg.model_info.name == target_model
+                        and (
+                            not target_source_name
+                            or not msg.model_info.provider
+                            or msg.model_info.provider == target_source_name
+                        )
+                    ):
                         assistant_content = msg.content
                     elif not msg.model_info:
                         # 如果没有 model_info，说明是旧数据，直接使用
@@ -944,16 +1280,23 @@ async def chat(request: ChatRequest):
         rendered_user_prompt = render_session_user_prompt(
             current_session, user_message.content
         )
-        return build_scoped_request(
+        scoped_messages = build_scoped_request(
             api_messages, rendered_user_prompt, include_assistant
         )
+        if message_attachments:
+            scoped_messages[-1]["content"] = _multimodal_user_content(
+                current_session.id,
+                scoped_messages[-1]["content"],
+                message_attachments,
+            )
+        return scoped_messages
     
     async def generate():
         import asyncio
         try:
             logger.info(f"📝 会话总消息数: {len(current_session.messages)}")
             is_parallel = len(models_to_use) > 1
-            logger.info(f"🚀 开始流式调用: models={models_to_use}, parallel={is_parallel}, session={current_session_id}")
+            logger.info(f"🚀 开始流式调用: models={models_to_use}, parallel={is_parallel}, session={current_session.id}")
             
             # 准备配置信息用于日志记录
             config_info = {
@@ -963,7 +1306,7 @@ async def chat(request: ChatRequest):
             
             if is_parallel:
                 # 多模型并行调用模式（真正的并行流式输出）
-                yield f"data: {json.dumps({'type': 'multi_model_start', 'models': models_to_use}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'multi_model_start', 'models': models_to_use, 'targets': public_model_targets(model_targets)}, ensure_ascii=False)}\n\n"
                 await asyncio.sleep(0)
                 
                 assistant_messages = []  # 存储所有模型的响应
@@ -971,10 +1314,17 @@ async def chat(request: ChatRequest):
                 model_messages_map = {}  # 存储每个模型的消息历史（用于日志记录）
                 
                 # 为每个模型发送开始标记
-                for model_index, model_name in enumerate(models_to_use):
-                    yield f"data: {json.dumps({'type': 'model_start', 'model_index': model_index, 'model': model_name}, ensure_ascii=False)}\n\n"
+                for model_index, target in enumerate(model_targets):
+                    model_name = target['model']
+                    yield f"data: {json.dumps({'type': 'model_start', 'model_index': model_index, 'model': model_name, 'model_key': target['key'], 'source_name': target['source_name']}, ensure_ascii=False)}\n\n"
                     await asyncio.sleep(0)
-                    model_results[model_index] = {'content': '', 'start_time': time.time(), 'model': model_name}
+                    model_results[model_index] = {
+                        'content': '',
+                        'start_time': time.time(),
+                        'model': model_name,
+                        'model_key': target['key'],
+                        'source_name': target['source_name'],
+                    }
                 
                 logger.info(f"🚀 并行调用 {len(models_to_use)} 个模型")
                 
@@ -982,22 +1332,26 @@ async def chat(request: ChatRequest):
                 chunk_queue = asyncio.Queue()
                 
                 # 定义单个模型的流式处理任务
-                async def stream_model(model_index: int, model_name: str):
+                async def stream_model(model_index: int, target: Dict[str, Any]):
+                    model_name = target['model']
+                    source = target['source']
                     try:
                         # 为当前模型构建专属的消息历史
-                        model_messages = build_messages_for_model(model_name)
-                        logger.info(f"🔧 模型 {model_name} 的消息历史: {len(model_messages)} 条")
+                        model_messages = build_messages_for_model(
+                            model_name, target['source_name']
+                        )
+                        logger.info(f"🔧 模型 {target['key']} 的消息历史: {len(model_messages)} 条")
                         log_model_request_context(
-                            model_name, model_messages, context_settings=context_settings
+                            target['key'], model_messages, context_settings=context_settings
                         )
                         
                         # 保存消息历史用于日志记录
-                        model_messages_map[model_name] = model_messages
+                        model_messages_map[target['key']] = model_messages
                         
                         # 创建异步客户端
                         client = AsyncOpenAI(
-                            api_key=source_to_use.api_key if source_to_use else api_config.api_key,
-                            base_url=source_to_use.base_url if source_to_use else api_config.base_url
+                            api_key=source.api_key,
+                            base_url=source.base_url
                         )
                         
                         # 异步调用模型（流式）
@@ -1007,7 +1361,7 @@ async def chat(request: ChatRequest):
                             temperature=session_config.temperature if session_config else 0.7,
                             top_p=session_config.top_p if session_config else 1.0,
                             stream=True,
-                            **get_chat_completion_extra_params(source_to_use, model_name)
+                            **get_chat_completion_extra_params(source, model_name)
                         )
                         
                         chunk_count = 0
@@ -1024,6 +1378,8 @@ async def chat(request: ChatRequest):
                                     'type': 'content',
                                     'model_index': model_index,
                                     'model': model_name,
+                                    'model_key': target['key'],
+                                    'source_name': target['source_name'],
                                     'data': content
                                 })
                         
@@ -1035,6 +1391,8 @@ async def chat(request: ChatRequest):
                             'type': 'model_done',
                             'model_index': model_index,
                             'model': model_name,
+                            'model_key': target['key'],
+                            'source_name': target['source_name'],
                             'latency_ms': latency_ms
                         })
                         
@@ -1044,13 +1402,15 @@ async def chat(request: ChatRequest):
                             'type': 'model_error',
                             'model_index': model_index,
                             'model': model_name,
+                            'model_key': target['key'],
+                            'source_name': target['source_name'],
                             'message': str(e)
                         })
                 
                 # 启动所有模型的并行任务
                 tasks = []
-                for model_index, model_name in enumerate(models_to_use):
-                    task = asyncio.create_task(stream_model(model_index, model_name))
+                for model_index, target in enumerate(model_targets):
+                    task = asyncio.create_task(stream_model(model_index, target))
                     tasks.append(task)
                 
                 # 从队列中读取并发送 chunks
@@ -1080,6 +1440,8 @@ async def chat(request: ChatRequest):
                     if result['content']:
                         assistant_messages.append({
                             'model': result['model'],
+                            'model_key': result['model_key'],
+                            'source_name': result['source_name'],
                             'content': result['content'],
                             'latency_ms': int((time.time() - result['start_time']) * 1000)
                         })
@@ -1095,12 +1457,14 @@ async def chat(request: ChatRequest):
                 for model_data in assistant_messages:
                     parallel_models_data.append({
                         "model": model_data['model'],
+                        "model_key": model_data['model_key'],
+                        "source_name": model_data['source_name'],
                         "content": model_data['content'],
                         "latency_ms": model_data['latency_ms'],
                         "model_info": {
-                            "id": model_data['model'],
+                            "id": model_data['model_key'],
                             "name": model_data['model'],
-                            "provider": source_to_use.name if source_to_use else "unknown"
+                            "provider": model_data['source_name']
                         }
                     })
                 
@@ -1121,16 +1485,16 @@ async def chat(request: ChatRequest):
                 current_session.messages.append(assistant_msg)
                 
                 current_session.updated_at = int(time.time())
-                save_current_session()
+                session_storage.save_session(current_session)
                 
                 # 记录每个模型的交互
                 for idx, model_data in enumerate(parallel_models_data):
                     model_name = model_data['model_info']['name']
                     # 使用保存的消息历史（调用 API 时的消息）
-                    model_messages = model_messages_map.get(model_name, [])
+                    model_messages = model_messages_map.get(model_data['model_key'], [])
                     log_model_interaction(
-                        session_id=current_session_id,
-                        model=model_name,
+                        session_id=current_session.id,
+                        model=model_data['model_key'],
                         messages=model_messages,
                         response=model_data['content'],
                         elapsed_time=model_data['latency_ms'] / 1000.0,
@@ -1144,11 +1508,15 @@ async def chat(request: ChatRequest):
                 
             else:
                 # 单模型模式
-                model_to_use = models_to_use[0]
+                target = model_targets[0]
+                model_to_use = target['model']
+                source_to_use = target['source']
                 start_time = time.time()
                 
                 # 为当前模型构建专属的消息历史
-                model_messages = build_messages_for_model(model_to_use)
+                model_messages = build_messages_for_model(
+                    model_to_use, target['source_name']
+                )
                 logger.info(f"🔧 模型 {model_to_use} 的消息历史: {len(model_messages)} 条")
                 log_model_request_context(
                     model_to_use, model_messages, context_settings=context_settings
@@ -1200,7 +1568,7 @@ async def chat(request: ChatRequest):
                 
                 # 记录模型交互
                 log_model_interaction(
-                    session_id=current_session_id,
+                    session_id=current_session.id,
                     model=model_to_use,
                     messages=model_messages,
                     response=assistant_message,
@@ -1222,7 +1590,7 @@ async def chat(request: ChatRequest):
                     created_at=assistant_msg_time,
                     children_ids=[],
                     model_info={
-                        "id": model_to_use,
+                        "id": target['key'],
                         "name": model_to_use,
                         "provider": source_to_use.name if source_to_use else "unknown"
                     },
@@ -1243,9 +1611,9 @@ async def chat(request: ChatRequest):
                 current_session.updated_at = assistant_msg_time
                 
                 # 保存到存储
-                save_current_session()
+                session_storage.save_session(current_session)
                 
-                logger.info(f"💾 AI 回复完成并保存，总长度: {len(assistant_message)}, session={current_session_id}")
+                logger.info(f"💾 AI 回复完成并保存，总长度: {len(assistant_message)}, session={current_session.id}")
                 
                 # 发送完成信号（包含消息 ID）
                 done_data = {'type': 'done', 'message_id': assistant_msg_id}
@@ -1255,9 +1623,9 @@ async def chat(request: ChatRequest):
             logger.error(f"❌ AI 调用出错: {e}", exc_info=True)
             # 记录错误
             if 'models_to_use' in locals() and 'api_messages' in locals():
-                for model in models_to_use:
+                for model in [target['key'] for target in model_targets]:
                     log_error(
-                        session_id=current_session_id,
+                        session_id=current_session.id,
                         model=model,
                         messages=api_messages,
                         error=e,
@@ -1314,6 +1682,7 @@ async def clear_chat():
     current_session = get_current_session()
     
     logger.info(f"清空会话 {current_session_id} 的对话历史")
+    _delete_screenshot_files(current_session.id)
     current_session.messages = []
     current_session.updated_at = int(time.time())
     
@@ -1453,6 +1822,72 @@ async def get_session(session_id: str):
     
     logger.debug(f"返回会话: {session.title}, {len(session.messages)} 条消息")
     return session.dict()
+
+
+@router.get("/sessions/{session_id}/audio/merged")
+async def merge_session_audio(session_id: str):
+    """Concatenate all WAV recordings associated with a session, in order."""
+    session = session_storage.load_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if not session.audio_files:
+        raise HTTPException(status_code=404, detail="该会话没有已关联的录音")
+
+    output = io.BytesIO()
+    expected_params = None
+    frames = []
+
+    for filename in session.audio_files:
+        audio_path = (VOICE_DIR / Path(filename).name).resolve()
+        try:
+            audio_path.relative_to(VOICE_DIR.resolve())
+        except ValueError:
+            logger.warning(f"跳过不安全的录音路径: {filename}")
+            continue
+        if not audio_path.is_file():
+            logger.warning(f"跳过不存在的录音文件: {audio_path}")
+            continue
+
+        try:
+            with wave.open(str(audio_path), "rb") as wav_file:
+                params = (
+                    wav_file.getnchannels(),
+                    wav_file.getsampwidth(),
+                    wav_file.getframerate(),
+                    wav_file.getcomptype(),
+                )
+                if expected_params is None:
+                    expected_params = params
+                elif params != expected_params:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"录音格式不一致，无法合并: {filename}",
+                    )
+                frames.append(wav_file.readframes(wav_file.getnframes()))
+        except HTTPException:
+            raise
+        except (wave.Error, OSError) as error:
+            logger.warning(f"跳过无法读取的录音文件 {audio_path}: {error}")
+
+    if expected_params is None or not frames:
+        raise HTTPException(status_code=404, detail="该会话关联的录音文件已不存在或无法读取")
+
+    channels, sample_width, frame_rate, compression = expected_params
+    with wave.open(output, "wb") as merged:
+        merged.setnchannels(channels)
+        merged.setsampwidth(sample_width)
+        merged.setframerate(frame_rate)
+        merged.setcomptype(compression, "not compressed")
+        for audio_frames in frames:
+            merged.writeframes(audio_frames)
+
+    output.seek(0)
+    download_name = f"session-{session_id}-audio.wav"
+    return StreamingResponse(
+        output,
+        media_type="audio/wav",
+        headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
+    )
 
 
 @router.post("/sessions/{session_id}/switch")
@@ -1603,6 +2038,7 @@ async def delete_session(session_id: str):
     
     # 4. 执行删除操作（删除文件和索引）
     if session_storage.delete_session(session_id):
+        _delete_screenshot_files(session_id)
         logger.info(f"会话删除成功: {session_id}")
     else:
         logger.error(f"会话删除失败: {session_id}")
@@ -1698,10 +2134,17 @@ async def delete_messages(session_id: str, request: BatchDeleteMessageRequest):
         if msg.children_ids:
             msg.children_ids = [cid for cid in msg.children_ids if cid not in all_ids_to_delete]
     
-    # 删除消息
+    # 删除消息及其本地截图附件
+    attachment_ids_to_delete = [
+        attachment.id
+        for msg in session.messages
+        if msg.id in all_ids_to_delete
+        for attachment in msg.attachments
+    ]
     original_count = len(session.messages)
     session.messages = [msg for msg in session.messages if msg.id not in all_ids_to_delete]
     deleted_count = original_count - len(session.messages)
+    _delete_screenshot_files(session_id, attachment_ids_to_delete)
     
     session.updated_at = int(time.time())
     session_storage.save_session(session)
@@ -1774,6 +2217,24 @@ async def update_session_config(session_id: str, config: SessionConfig):
     if not session:
         logger.warning(f"会话不存在: {session_id}")
         raise HTTPException(status_code=404, detail="会话不存在")
+
+    if config.model_targets:
+        for target in config.model_targets:
+            source = next(
+                (item for item in config_sources if item.name == target.source_name),
+                None,
+            )
+            if not source or target.model not in source.models:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"无效的模型配置: {target.source_name} · {target.model}",
+                )
+        first_source = config.model_targets[0].source_name
+        config.source_name = first_source
+        config.models = [
+            target.model for target in config.model_targets
+            if target.source_name == first_source
+        ]
     
     # 更新会话配置
     session.session_config = config
@@ -1790,7 +2251,7 @@ async def update_session_config(session_id: str, config: SessionConfig):
     
     logger.info(
         f"配置已更新: session={session_id}, "
-        f"models={config.models}, "
+        f"model_targets={[(target.source_name, target.model) for target in config.model_targets] or config.models}, "
         f"system_prompt={'已设置' if config.system_prompt else '未设置'}"
     )
     
@@ -1952,26 +2413,8 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
     
     session_config = session.session_config
     context_settings = resolve_chat_context_config(session_config)
-    if request.model:
-        models_to_use = [request.model]
-        source_to_use = next((s for s in config_sources if request.model in s.models), None)
-        source_name = source_to_use.name if source_to_use else None
-    elif session_config and session_config.models and len(session_config.models) > 0:
-        models_to_use = session_config.models
-        source_name = session_config.source_name or current_config.current_source
-        source_to_use = next((s for s in config_sources if s.name == source_name), None)
-    else:
-        models_to_use = [api_config.model]
-        source_name = current_config.current_source
-        source_to_use = next((s for s in config_sources if s.name == source_name), None)
-    
-    if not source_to_use:
-        logger.error(f"配置源不存在: source={source_name}, models={models_to_use}")
-        raise HTTPException(status_code=400, detail=f"配置源 {source_name or '未知'} 不存在")
-    
-    if not source_to_use.api_key:
-        logger.error(f"API Key 未配置: source={source_to_use.name}, models={models_to_use}")
-        raise HTTPException(status_code=400, detail=f"请先配置 {source_to_use.name} 的 API Key")
+    model_targets = resolve_model_targets(session_config, request.model)
+    models_to_use = [target["model"] for target in model_targets]
     
     # 更新消息内容
     target_message.content = request.new_content
@@ -2017,7 +2460,10 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
     
     logger.info(f"构建消息历史: {len(messages_history)} 条消息")
     
-    def build_messages_for_model_regenerate(target_model: str) -> List[Dict[str, str]]:
+    def build_messages_for_model_regenerate(
+        target_model: str,
+        target_source_name: Optional[str] = None,
+    ) -> List[Dict[str, str]]:
         """
         为重新生成构建特定模型的消息历史
         
@@ -2058,12 +2504,30 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                 if msg.is_parallel_response and msg.parallel_models:
                     # 并行响应：从 parallel_models 中找到当前模型的回复
                     for model_data in msg.parallel_models:
-                        if model_data.get('model') == target_model or model_data.get('model_info', {}).get('name') == target_model:
+                        model_info = model_data.get('model_info', {})
+                        same_model = (
+                            model_data.get('model') == target_model
+                            or model_info.get('name') == target_model
+                        )
+                        same_source = (
+                            not target_source_name
+                            or not model_info.get('provider')
+                            or model_info.get('provider') == target_source_name
+                        )
+                        if same_model and same_source:
                             assistant_content = model_data.get('content', '')
                             break
                 else:
                     # 单模型响应：检查是否是当前模型
-                    if msg.model_info and msg.model_info.name == target_model:
+                    if (
+                        msg.model_info
+                        and msg.model_info.name == target_model
+                        and (
+                            not target_source_name
+                            or not msg.model_info.provider
+                            or msg.model_info.provider == target_source_name
+                        )
+                    ):
                         assistant_content = msg.content
                     elif not msg.model_info:
                         # 如果没有 model_info，说明是旧数据，直接使用
@@ -2080,9 +2544,16 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
         rendered_user_prompt = render_session_user_prompt(
             session, target_message.content
         )
-        return build_scoped_request(
+        scoped_messages = build_scoped_request(
             api_messages, rendered_user_prompt, include_assistant
         )
+        if target_message.attachments:
+            scoped_messages[-1]["content"] = _multimodal_user_content(
+                session.id,
+                scoped_messages[-1]["content"],
+                target_message.attachments,
+            )
+        return scoped_messages
     
     async def generate():
         import asyncio
@@ -2100,38 +2571,49 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
             
             if is_parallel:
                 # 多模型并行调用
-                yield f"data: {json.dumps({'type': 'multi_model_start', 'models': models_to_use}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'multi_model_start', 'models': models_to_use, 'targets': public_model_targets(model_targets)}, ensure_ascii=False)}\n\n"
                 await asyncio.sleep(0)
                 
                 assistant_messages = []
                 model_results = {}
                 model_messages_map = {}  # 存储每个模型的消息历史（用于日志记录）
                 
-                for model_index, model_name in enumerate(models_to_use):
-                    yield f"data: {json.dumps({'type': 'model_start', 'model_index': model_index, 'model': model_name}, ensure_ascii=False)}\n\n"
+                for model_index, target in enumerate(model_targets):
+                    model_name = target['model']
+                    yield f"data: {json.dumps({'type': 'model_start', 'model_index': model_index, 'model': model_name, 'model_key': target['key'], 'source_name': target['source_name']}, ensure_ascii=False)}\n\n"
                     await asyncio.sleep(0)
-                    model_results[model_index] = {'content': '', 'start_time': time.time(), 'model': model_name}
+                    model_results[model_index] = {
+                        'content': '',
+                        'start_time': time.time(),
+                        'model': model_name,
+                        'model_key': target['key'],
+                        'source_name': target['source_name'],
+                    }
                 
                 chunk_queue = asyncio.Queue()
                 
-                async def stream_model(model_index: int, model_name: str):
+                async def stream_model(model_index: int, target: Dict[str, Any]):
+                    model_name = target['model']
+                    source = target['source']
                     try:
                         # 为当前模型构建专属的消息历史
-                        model_messages = build_messages_for_model_regenerate(model_name)
-                        logger.info(f"🔧 重新生成 - 模型 {model_name} 的消息历史: {len(model_messages)} 条")
+                        model_messages = build_messages_for_model_regenerate(
+                            model_name, target['source_name']
+                        )
+                        logger.info(f"🔧 重新生成 - 模型 {target['key']} 的消息历史: {len(model_messages)} 条")
                         log_model_request_context(
-                            model_name,
+                            target['key'],
                             model_messages,
                             label="重新生成",
                             context_settings=context_settings,
                         )
                         
                         # 保存消息历史用于日志记录
-                        model_messages_map[model_name] = model_messages
+                        model_messages_map[target['key']] = model_messages
                         
                         client = AsyncOpenAI(
-                            api_key=source_to_use.api_key if source_to_use else api_config.api_key,
-                            base_url=source_to_use.base_url if source_to_use else api_config.base_url
+                            api_key=source.api_key,
+                            base_url=source.base_url
                         )
                         
                         stream = await client.chat.completions.create(
@@ -2140,7 +2622,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                             temperature=session_config.temperature if session_config else 0.7,
                             top_p=session_config.top_p if session_config else 1.0,
                             stream=True,
-                            **get_chat_completion_extra_params(source_to_use, model_name)
+                            **get_chat_completion_extra_params(source, model_name)
                         )
                         
                         chunk_count = 0
@@ -2156,6 +2638,8 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                                     'type': 'content',
                                     'model_index': model_index,
                                     'model': model_name,
+                                    'model_key': target['key'],
+                                    'source_name': target['source_name'],
                                     'data': content
                                 })
                         
@@ -2166,6 +2650,8 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                             'type': 'model_done',
                             'model_index': model_index,
                             'model': model_name,
+                            'model_key': target['key'],
+                            'source_name': target['source_name'],
                             'latency_ms': latency_ms
                         })
                         
@@ -2175,12 +2661,14 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                             'type': 'model_error',
                             'model_index': model_index,
                             'model': model_name,
+                            'model_key': target['key'],
+                            'source_name': target['source_name'],
                             'message': str(e)
                         })
                 
                 tasks = []
-                for model_index, model_name in enumerate(models_to_use):
-                    task = asyncio.create_task(stream_model(model_index, model_name))
+                for model_index, target in enumerate(model_targets):
+                    task = asyncio.create_task(stream_model(model_index, target))
                     tasks.append(task)
                 
                 completed_models = 0
@@ -2203,6 +2691,8 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                     if result['content']:
                         assistant_messages.append({
                             'model': result['model'],
+                            'model_key': result['model_key'],
+                            'source_name': result['source_name'],
                             'content': result['content'],
                             'latency_ms': int((time.time() - result['start_time']) * 1000)
                         })
@@ -2215,12 +2705,14 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                 for model_data in assistant_messages:
                     parallel_models_data.append({
                         "model": model_data['model'],
+                        "model_key": model_data['model_key'],
+                        "source_name": model_data['source_name'],
                         "content": model_data['content'],
                         "latency_ms": model_data['latency_ms'],
                         "model_info": {
-                            "id": model_data['model'],
+                            "id": model_data['model_key'],
                             "name": model_data['model'],
-                            "provider": source_to_use.name if source_to_use else "unknown"
+                            "provider": model_data['source_name']
                         }
                     })
                 
@@ -2261,10 +2753,10 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                 for model_data in parallel_models_data:
                     model_name = model_data['model_info']['name']
                     # 使用保存的消息历史（调用 API 时的消息）
-                    model_messages = model_messages_map.get(model_name, [])
+                    model_messages = model_messages_map.get(model_data['model_key'], [])
                     log_model_interaction(
                         session_id=session_id,
-                        model=model_name,
+                        model=model_data['model_key'],
                         messages=model_messages,
                         response=model_data['content'],
                         elapsed_time=model_data['latency_ms'] / 1000.0,
@@ -2277,11 +2769,15 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                 
             else:
                 # 单模型模式
-                model_to_use = models_to_use[0]
+                target = model_targets[0]
+                model_to_use = target['model']
+                source_to_use = target['source']
                 start_time = time.time()
                 
                 # 为当前模型构建专属的消息历史
-                model_messages = build_messages_for_model_regenerate(model_to_use)
+                model_messages = build_messages_for_model_regenerate(
+                    model_to_use, target['source_name']
+                )
                 logger.info(f"🔧 重新生成 - 模型 {model_to_use} 的消息历史: {len(model_messages)} 条")
                 log_model_request_context(
                     model_to_use,
@@ -2345,7 +2841,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                     created_at=assistant_msg_time,
                     children_ids=[],
                     model_info={
-                        "id": model_to_use,
+                        "id": target['key'],
                         "name": model_to_use,
                         "provider": source_to_use.name if source_to_use else "unknown"
                     },
@@ -2389,7 +2885,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
             logger.error(f"重新生成失败: {e}", exc_info=True)
             # 记录错误
             if 'models_to_use' in locals() and 'api_messages' in locals():
-                for model in models_to_use:
+                for model in [target['key'] for target in model_targets]:
                     log_error(
                         session_id=session_id,
                         model=model,

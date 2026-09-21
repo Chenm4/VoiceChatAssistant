@@ -274,6 +274,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import api from '../utils/api'
 import { renderMarkdown } from '../utils/markdown'
+import { copyText } from '../utils/clipboard'
 
 defineEmits(['back'])
 
@@ -562,8 +563,13 @@ async function saveReview(item) {
 }
 
 async function copyAnswer(answer) {
-  await navigator.clipboard.writeText(answer)
-  ElMessage.success('已复制回答')
+  try {
+    await copyText(answer)
+    ElMessage.success('已复制回答')
+  } catch (error) {
+    console.error('复制回答失败:', error)
+    ElMessage.error('复制失败，请检查剪贴板权限')
+  }
 }
 
 function formatTime(timestamp) {

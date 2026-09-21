@@ -91,6 +91,23 @@
                 </div>
                 <!-- 正常显示 -->
                 <div v-else class="bubble-content">
+                  <div v-if="msg.attachments?.length" class="message-attachments">
+                    <a
+                      v-for="attachment in msg.attachments"
+                      :key="attachment.id"
+                      :href="attachmentUrl(attachment)"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="message-attachment-link"
+                      title="打开截图"
+                    >
+                      <img
+                        :src="attachmentUrl(attachment)"
+                        alt="笔试题截图"
+                        class="message-attachment-image"
+                      />
+                    </a>
+                  </div>
                   <div class="message-text whitespace-pre-wrap">{{ msg.content }}</div>
                 </div>
                 
@@ -249,7 +266,7 @@
                 <!-- 模型标识 -->
                 <div v-if="msg.model_info" class="model-badge">
                   <el-tag size="small" effect="plain" :type="getModelTagType(msg.model_info.provider)">
-                    {{ msg.model_info.name }}
+                    {{ msg.model_info.provider && msg.model_info.provider !== 'unknown' ? `${msg.model_info.provider} · ` : '' }}{{ msg.model_info.name }}
                   </el-tag>
                 </div>
                 
@@ -316,6 +333,7 @@
 import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { renderMarkdown } from '../utils/markdown'
+import { copyText } from '../utils/clipboard'
 
 const props = defineProps({
   messages: {
@@ -342,6 +360,11 @@ const props = defineProps({
 
 const emit = defineEmits(['message-updated', 'message-deleted', 'messages-deleted', 'regenerate'])
 
+function attachmentUrl(attachment) {
+  if (!props.currentSessionId || !attachment?.id) return ''
+  return `/api/attachments/${encodeURIComponent(props.currentSessionId)}/${encodeURIComponent(attachment.id)}`
+}
+
 // 根据 provider 返回不同的标签类型
 function getModelTagType(provider) {
   const typeMap = {
@@ -357,15 +380,19 @@ function getModelTagType(provider) {
 // 提取模型显示名称（去除/前的内容）
 function getModelDisplayName(modelMsg) {
   const fullName = modelMsg.model_info?.name || modelMsg.model || '模型'
-  // 如果包含/，只返回/后面的内容
-  if (fullName.includes('/')) {
-    return fullName.split('/').pop()
-  }
-  return fullName
+  const shortName = fullName.includes('/') ? fullName.split('/').pop() : fullName
+  const sourceName = modelMsg.model_info?.provider || modelMsg.source_name
+  return sourceName && sourceName !== 'unknown'
+    ? `${sourceName} · ${shortName}`
+    : shortName
 }
 
 function getModelFullName(modelMsg) {
-  return modelMsg?.model_info?.name || modelMsg?.model || ''
+  const explicitId = modelMsg?.model_info?.id || modelMsg?.model_key
+  if (explicitId) return explicitId
+  const model = modelMsg?.model_info?.name || modelMsg?.model || ''
+  const source = modelMsg?.model_info?.provider || modelMsg?.source_name
+  return source && source !== 'unknown' ? `${source}::${model}` : model
 }
 
 function getMessageModels(msg) {
@@ -378,7 +405,11 @@ function getPreferredModelIndex(msg) {
   
   const defaultModel = multiModelPreferences.value.defaultModel
   if (defaultModel) {
-    const index = models.findIndex(modelMsg => getModelFullName(modelMsg) === defaultModel)
+    const index = models.findIndex(modelMsg => (
+      getModelFullName(modelMsg) === defaultModel
+      || modelMsg?.model_info?.name === defaultModel
+      || modelMsg?.model === defaultModel
+    ))
     if (index >= 0) return index
   }
   
@@ -413,7 +444,9 @@ function getModelCardStyle(messageIndex, msg) {
   if (!width) return {}
   
   return {
-    flex: focused ? '0 1 auto' : `0 0 ${width}px`,
+    // Parallel cards must stay on the same row. The saved width remains the
+    // preferred width, but flex-shrink may reduce it when the row is narrower.
+    flex: focused ? '0 1 auto' : `0 1 ${width}px`,
     width: `${width}px`,
     maxWidth: focused ? '100%' : undefined
   }
@@ -574,7 +607,7 @@ function cancelEdit() {
 // 复制消息
 async function copyMessage(content, event) {
   try {
-    await navigator.clipboard.writeText(content)
+    await copyText(content)
     // 可以添加一个简单的提示
     const btn = event.currentTarget
     const originalHTML = btn.innerHTML
@@ -1081,6 +1114,29 @@ defineExpose({
   font-weight: 500;
 }
 
+.message-attachments {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.message-attachment-link {
+  display: block;
+  overflow: hidden;
+  border: 1px solid rgba(59, 130, 246, .2);
+  border-radius: 10px;
+  background: white;
+}
+
+.message-attachment-image {
+  display: block;
+  width: 100%;
+  max-height: 360px;
+  object-fit: contain;
+  background: #f8fafc;
+}
+
 .assistant-bubble .bubble-content {
   background: white;
   color: #2d3748;
@@ -1110,6 +1166,7 @@ defineExpose({
   flex-direction: column;
   gap: 12px;
   flex: 1;
+  min-width: 0;
   padding: 4px;
 }
 
@@ -1118,8 +1175,10 @@ defineExpose({
   display: flex;
   flex-direction: row;
   gap: 12px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: stretch;
+  width: 100%;
+  min-width: 0;
 }
 
 .model-view-wrapper {
@@ -1127,6 +1186,7 @@ defineExpose({
   align-items: stretch;
   gap: 8px;
   width: 100%;
+  min-width: 0;
 }
 
 .model-view-wrapper.focused-mode {

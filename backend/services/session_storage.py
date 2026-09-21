@@ -193,6 +193,7 @@ class SessionStorage:
                 updated_at=session.updated_at,
                 storage_path=session.storage_path,
                 message_count=len(session.messages),
+                audio_count=len(session.audio_files),
                 used_models=list(used_models)
             )
             

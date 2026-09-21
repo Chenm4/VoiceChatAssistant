@@ -16,16 +16,9 @@
 
     <div v-else class="settings-body">
       <div class="section">
-        <label class="label">配置源</label>
-        <el-select v-model="selectedSource" @change="handleSourceChange" placeholder="选择配置源" style="width: 100%">
-          <el-option v-for="source in config.sources" :key="source.name" :label="source.name" :value="source.name" />
-        </el-select>
-      </div>
-
-      <div class="section">
         <div class="label-with-tag">
           <label class="label">模型选择</label>
-          <el-tag size="small" type="info">支持多选并行</el-tag>
+          <el-tag size="small" type="info">支持跨配置源并行</el-tag>
         </div>
         <el-select 
           v-model="selectedModels" 
@@ -35,13 +28,23 @@
           placeholder="选择一个或多个模型" 
           style="width: 100%"
         >
-          <el-option 
-            v-for="model in currentSourceModels" 
-            :key="model" 
-            :label="model" 
-            :value="model" 
-          />
+          <el-option-group
+            v-for="source in config.sources"
+            :key="source.name"
+            :label="source.name"
+          >
+            <el-option
+              v-for="model in source.models"
+              :key="modelTargetKey(source.name, model)"
+              :label="`${source.name} · ${model}`"
+              :value="modelTargetKey(source.name, model)"
+            />
+          </el-option-group>
         </el-select>
+        <div class="model-order-hint">
+          <el-icon><InfoFilled /></el-icon>
+          可以从不同配置源同时选择模型；每个模型使用所属配置源的 API 地址和密钥。
+        </div>
         <div v-if="selectedModels.length > 1" class="model-order-hint">
           <el-icon><InfoFilled /></el-icon>
           拖拽下方标签可调整模型显示顺序
@@ -54,7 +57,7 @@
         <div class="model-tags-container">
           <draggable 
             v-model="selectedModels" 
-            item-key="id"
+            :item-key="item => item"
             class="model-tags-list"
             :animation="200"
           >
@@ -66,7 +69,7 @@
                 class="model-tag-draggable"
               >
                 <el-icon class="drag-handle"><Rank /></el-icon>
-                {{ element }}
+                {{ modelTargetLabel(element) }}
               </el-tag>
             </template>
           </draggable>
@@ -90,7 +93,7 @@
           <el-option
             v-for="model in selectedModels"
             :key="model"
-            :label="model"
+            :label="modelTargetLabel(model)"
             :value="model"
           />
         </el-select>
@@ -212,6 +215,26 @@
         </div>
         <div class="prompt-hint">
           保存后立即应用到当前会话的用户消息、AI 回答、标题和代码。
+        </div>
+      </div>
+
+      <div class="section screenshot-prompt-section">
+        <div class="label-with-tag">
+          <label class="label">截图答题提示词</label>
+          <el-tag size="small" type="success">当前会话</el-tag>
+        </div>
+        <el-input
+          v-model="screenshotPrompt"
+          type="textarea"
+          :rows="5"
+          resize="vertical"
+          maxlength="4000"
+          show-word-limit
+          placeholder="设置点击截图按钮时发送给 AI 的基础指令"
+        />
+        <div class="prompt-hint neutral-hint">
+          <el-icon><InfoFilled /></el-icon>
+          点击截图按钮后会直接发送此提示词；输入框中的文字会作为补充要求追加。
         </div>
       </div>
 
@@ -350,6 +373,8 @@ const props = defineProps({
 
 const emit = defineEmits(['close', 'updated'])
 
+const DEFAULT_SCREENSHOT_PROMPT = '请识别截图中的笔试题。回答时请在开头先简要、直接地给出最终答案，然后再逐题说明简要思路；代码题请给出可运行代码并分析时间复杂度和空间复杂度。'
+
 const selectedSource = ref('')
 const selectedModels = ref([])  // 改为数组支持多选
 const temperature = ref(0.7)
@@ -357,6 +382,7 @@ const topP = ref(1)
 const contextTurns = ref(15)
 const contextChars = ref(12000)
 const includeAssistantHistory = ref(false)
+const screenshotPrompt = ref(DEFAULT_SCREENSHOT_PROMPT)
 const displayFontSize = ref(16)
 const displayLineHeight = ref(1.7)
 const saving = ref(false)
@@ -463,20 +489,44 @@ const promptTemplates = ref([
   }
 ])
 
-const currentSourceModels = computed(() => {
-  const source = props.config.sources?.find(s => s.name === selectedSource.value)
-  return source ? source.models : []
-})
+function modelTargetKey(sourceName, model) {
+  return `${sourceName}::${model}`
+}
+
+function parseModelTargetKey(key) {
+  const separatorIndex = String(key).indexOf('::')
+  if (separatorIndex < 0) {
+    return { source_name: selectedSource.value || props.config.current_source, model: key }
+  }
+  return {
+    source_name: key.slice(0, separatorIndex),
+    model: key.slice(separatorIndex + 2)
+  }
+}
+
+function modelTargetLabel(key) {
+  const target = parseModelTargetKey(key)
+  return `${target.source_name} · ${target.model}`
+}
+
+const selectedModelTargets = computed(() => selectedModels.value.map(parseModelTargetKey))
 
 function getFormState() {
+  const targets = selectedModelTargets.value
+  const firstTarget = targets[0]
+  const legacyModels = firstTarget
+    ? targets.filter(target => target.source_name === firstTarget.source_name).map(target => target.model)
+    : []
   return {
-    source_name: selectedSource.value,
-    models: [...selectedModels.value],
+    source_name: firstTarget?.source_name || selectedSource.value,
+    models: legacyModels,
+    model_targets: targets,
     temperature: Number(temperature.value),
     top_p: Number(topP.value),
     max_history_turns: Number(contextTurns.value),
     max_history_chars: Number(contextChars.value),
     include_assistant_history: Boolean(includeAssistantHistory.value),
+    screenshot_prompt: screenshotPrompt.value,
     display_font_size: Number(displayFontSize.value),
     display_line_height: Number(displayLineHeight.value),
     system_prompt: systemPrompt.value,
@@ -569,19 +619,26 @@ function initFromSession() {
   const sessionConfig = props.session.session_config
   if (sessionConfig) {
     selectedSource.value = sessionConfig.source_name || props.config.current_source
-    // 支持新旧格式：models 数组或单个 model
-    if (sessionConfig.models && sessionConfig.models.length > 0) {
-      selectedModels.value = [...sessionConfig.models]
+    // 新格式记录每个模型所属源；旧格式仍按会话的单一 source_name 迁移。
+    if (sessionConfig.model_targets?.length > 0) {
+      selectedModels.value = sessionConfig.model_targets.map(target => (
+        modelTargetKey(target.source_name, target.model)
+      ))
+    } else if (sessionConfig.models && sessionConfig.models.length > 0) {
+      selectedModels.value = sessionConfig.models.map(model => (
+        modelTargetKey(selectedSource.value, model)
+      ))
     } else if (sessionConfig.model) {
-      selectedModels.value = [sessionConfig.model]
+      selectedModels.value = [modelTargetKey(selectedSource.value, sessionConfig.model)]
     } else {
-      selectedModels.value = [props.config.current_model]
+      selectedModels.value = [modelTargetKey(props.config.current_source, props.config.current_model)]
     }
     temperature.value = sessionConfig.temperature ?? 0.7
     topP.value = sessionConfig.top_p ?? 1
     contextTurns.value = sessionConfig.max_history_turns ?? 15
     contextChars.value = sessionConfig.max_history_chars ?? 12000
     includeAssistantHistory.value = sessionConfig.include_assistant_history ?? false
+    screenshotPrompt.value = sessionConfig.screenshot_prompt || DEFAULT_SCREENSHOT_PROMPT
     displayFontSize.value = sessionConfig.display_font_size ?? 16
     displayLineHeight.value = sessionConfig.display_line_height ?? 1.7
     systemPrompt.value = sessionConfig.system_prompt || ''
@@ -605,12 +662,13 @@ function initFromSession() {
     }
   } else {
     selectedSource.value = props.config.current_source
-    selectedModels.value = [props.config.current_model]
+    selectedModels.value = [modelTargetKey(props.config.current_source, props.config.current_model)]
     temperature.value = 0.7
     topP.value = 1
     contextTurns.value = 15
     contextChars.value = 12000
     includeAssistantHistory.value = false
+    screenshotPrompt.value = DEFAULT_SCREENSHOT_PROMPT
     displayFontSize.value = 16
     displayLineHeight.value = 1.7
     systemPrompt.value = ''
@@ -641,14 +699,6 @@ watch(selectedModels, (models) => {
     defaultDisplayModel.value = models[0]
   }
 }, { deep: true })
-
-function handleSourceChange() {
-  const source = props.config.sources.find(s => s.name === selectedSource.value)
-  if (source && source.models.length > 0) {
-    // 切换配置源时，只保留第一个模型
-    selectedModels.value = [source.models[0]]
-  }
-}
 
 function removeModel(index) {
   if (selectedModels.value.length > 1) {
@@ -697,6 +747,10 @@ async function handleSave() {
     ElMessage.warning('请至少选择一个模型')
     return
   }
+  if (!screenshotPrompt.value.trim()) {
+    ElMessage.warning('截图答题提示词不能为空')
+    return
+  }
   
   saving.value = true
   try {
@@ -713,14 +767,21 @@ async function handleSave() {
       sharedBackgroundTouched.value = false
     }
 
+    const targets = selectedModelTargets.value
+    const firstTarget = targets[0]
+    const legacyModels = targets
+      .filter(target => target.source_name === firstTarget.source_name)
+      .map(target => target.model)
     const payload = {
-      source_name: selectedSource.value,
-      models: selectedModels.value,
+      source_name: firstTarget.source_name,
+      models: legacyModels,
+      model_targets: targets,
       temperature: Number(temperature.value),
       top_p: Number(topP.value),
       max_history_turns: Number(contextTurns.value),
       max_history_chars: Number(contextChars.value),
       include_assistant_history: Boolean(includeAssistantHistory.value),
+      screenshot_prompt: screenshotPrompt.value.trim(),
       display_font_size: Number(displayFontSize.value),
       display_line_height: Number(displayLineHeight.value),
       system_prompt: systemPrompt.value || null,
@@ -748,12 +809,13 @@ async function handleSave() {
 
 function handleReset() {
   selectedSource.value = props.config.current_source
-  selectedModels.value = [props.config.current_model]
+  selectedModels.value = [modelTargetKey(props.config.current_source, props.config.current_model)]
   temperature.value = 0.7
   topP.value = 1
   contextTurns.value = 15
   contextChars.value = 12000
   includeAssistantHistory.value = false
+  screenshotPrompt.value = DEFAULT_SCREENSHOT_PROMPT
   displayFontSize.value = 16
   displayLineHeight.value = 1.7
   systemPrompt.value = ''
