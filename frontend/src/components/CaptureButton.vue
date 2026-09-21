@@ -5,7 +5,7 @@
     class="capture-float-button"
     :class="{ connected, loading, ready }"
     :disabled="disabled"
-    :title="connected ? '截图并直接发送（可拖动，右键复位）' : '选择标签页并截图（可拖动，右键复位）'"
+    :title="connected ? '截图并直接发送（可拖动，右键复位）' : '选择窗口或标签页并截图（可拖动，右键复位）'"
     aria-label="截图答题"
     @pointerdown="handlePointerDown"
     @contextmenu.prevent="resetPosition"

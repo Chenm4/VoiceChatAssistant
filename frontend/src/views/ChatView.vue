@@ -96,7 +96,7 @@ import SessionSidebar from '../components/SessionSidebar.vue'
 import SessionSettingsSidebar from '../components/SessionSettingsSidebar.vue'
 import api from '../utils/api'
 import { copyText } from '../utils/clipboard'
-import { TabScreenCapture } from '../utils/screenCapture'
+import { DisplayScreenCapture } from '../utils/screenCapture'
 
 defineEmits(['open-prompt-lab'])
 
@@ -125,7 +125,7 @@ const abortController = ref(null) // 用于取消请求
 const captureConnected = ref(false)
 const captureSourceName = ref('')
 const isCapturing = ref(false)
-let tabCapture = null
+let displayCapture = null
 
 // 会话管理状态
 const sessions = ref([])
@@ -491,20 +491,20 @@ async function handleSendMessage(options = {}) {
   }
 }
 
-function ensureTabCapture() {
-  if (!tabCapture) {
-    tabCapture = new TabScreenCapture(() => {
+function ensureDisplayCapture() {
+  if (!displayCapture) {
+    displayCapture = new DisplayScreenCapture(() => {
       captureConnected.value = false
       captureSourceName.value = ''
-      showNotification('标签页共享已停止', 'info')
+      showNotification('窗口或标签页共享已停止', 'info')
     })
   }
-  return tabCapture
+  return displayCapture
 }
 
-async function selectCaptureTab() {
-  const capture = ensureTabCapture()
-  const label = await capture.selectTab()
+async function selectCaptureSource() {
+  const capture = ensureDisplayCapture()
+  const label = await capture.selectSource()
   captureConnected.value = true
   captureSourceName.value = label
 }
@@ -540,9 +540,9 @@ async function handleCaptureAndSend() {
 
   isCapturing.value = true
   try {
-    const capture = ensureTabCapture()
+    const capture = ensureDisplayCapture()
     if (!capture.connected) {
-      await selectCaptureTab()
+      await selectCaptureSource()
     }
     const frame = await capture.capture()
     const attachment = await uploadScreenshot(frame)
@@ -559,12 +559,12 @@ async function handleCaptureAndSend() {
     })
   } catch (error) {
     if (error?.name === 'NotAllowedError') {
-      showNotification('未获得标签页共享权限', 'warning')
+      showNotification('未获得窗口或标签页共享权限', 'warning')
     } else {
       console.error('截图答题失败:', error)
       showNotification(error.message || '截图答题失败', 'error', 5000)
     }
-    captureConnected.value = Boolean(tabCapture?.connected)
+    captureConnected.value = Boolean(displayCapture?.connected)
     if (!captureConnected.value) captureSourceName.value = ''
   } finally {
     isCapturing.value = false
@@ -573,16 +573,16 @@ async function handleCaptureAndSend() {
 
 async function handleResetCapture() {
   if (isCapturing.value || isSending.value) return
-  ensureTabCapture().stop()
+  ensureDisplayCapture().stop()
   captureConnected.value = false
   captureSourceName.value = ''
   isCapturing.value = true
   try {
-    await selectCaptureTab()
-    showNotification('已更换截图标签页', 'success')
+    await selectCaptureSource()
+    showNotification('已更换截图窗口或标签页', 'success')
   } catch (error) {
     if (error?.name !== 'NotAllowedError') {
-      showNotification(error.message || '选择标签页失败', 'error')
+      showNotification(error.message || '选择窗口或标签页失败', 'error')
     }
   } finally {
     isCapturing.value = false
@@ -1435,8 +1435,8 @@ onUnmounted(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
   window.removeEventListener('popstate', handlePopState)
 
-  tabCapture?.stop()
-  tabCapture = null
+  displayCapture?.stop()
+  displayCapture = null
   
   // 停止状态轮询
   if (recordingStatusInterval) {

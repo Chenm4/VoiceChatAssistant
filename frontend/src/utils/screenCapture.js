@@ -5,14 +5,14 @@ function waitForVideo(video) {
     return Promise.resolve()
   }
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('等待标签页画面超时')), 8000)
+    const timeout = setTimeout(() => reject(new Error('等待共享画面超时')), 8000)
     video.addEventListener('loadeddata', () => {
       clearTimeout(timeout)
       resolve()
     }, { once: true })
     video.addEventListener('error', () => {
       clearTimeout(timeout)
-      reject(new Error('无法读取共享标签页画面'))
+      reject(new Error('无法读取共享画面'))
     }, { once: true })
   })
 }
@@ -26,7 +26,7 @@ function canvasToBlob(canvas) {
   })
 }
 
-export class TabScreenCapture {
+export class DisplayScreenCapture {
   constructor(onEnded) {
     this.stream = null
     this.video = null
@@ -39,18 +39,20 @@ export class TabScreenCapture {
 
   get label() {
     const label = this.stream?.getVideoTracks()[0]?.label || ''
-    if (!label || label.includes('media-stream://')) return '已选择标签页'
+    if (!label || label.includes('media-stream://')) return '已选择窗口或标签页'
     return label
   }
 
-  async selectTab() {
+  async selectSource() {
     if (!navigator.mediaDevices?.getDisplayMedia) {
-      throw new Error('当前浏览器不支持标签页截图，请使用最新版 Chrome 或 Edge')
+      throw new Error('当前浏览器不支持窗口截图，请使用最新版 Chrome 或 Edge')
     }
 
     this.stop()
     const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { displaySurface: 'browser', frameRate: { ideal: 2, max: 5 } },
+      // Prefer the window picker while continuing to allow browser tabs.
+      // The monitor option remains excluded to avoid capturing the full desktop.
+      video: { displaySurface: 'window', frameRate: { ideal: 2, max: 5 } },
       audio: false,
       selfBrowserSurface: 'exclude',
       surfaceSwitching: 'include',
@@ -59,9 +61,9 @@ export class TabScreenCapture {
 
     const track = stream.getVideoTracks()[0]
     const displaySurface = track?.getSettings?.().displaySurface
-    if (displaySurface && displaySurface !== 'browser') {
+    if (displaySurface === 'monitor') {
       stream.getTracks().forEach(item => item.stop())
-      throw new Error('请选择一个浏览器标签页，不要选择窗口或整个屏幕')
+      throw new Error('请选择一个窗口或浏览器标签页，不要选择整个屏幕')
     }
 
     this.stream = stream
@@ -81,7 +83,7 @@ export class TabScreenCapture {
 
   async capture() {
     if (!this.connected || !this.video) {
-      throw new Error('请先选择要截图的标签页')
+      throw new Error('请先选择要截图的窗口或标签页')
     }
     await waitForVideo(this.video)
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))

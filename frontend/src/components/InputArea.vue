@@ -3,8 +3,8 @@
     <div class="input-wrapper">
       <div v-if="captureConnected" class="capture-status">
         <span class="capture-dot"></span>
-        <span class="capture-label" :title="captureSourceName">正在捕获：{{ captureSourceName || '已选择标签页' }}</span>
-        <button class="capture-reset" type="button" @click="$emit('reset-capture')">更换标签页</button>
+        <span class="capture-label" :title="captureSourceName">正在捕获：{{ captureSourceName || '已选择窗口或标签页' }}</span>
+        <button class="capture-reset" type="button" @click="$emit('reset-capture')">更换来源</button>
       </div>
       <div class="input-container" :class="{ focused: isFocused }">
         <div class="textarea-wrapper">
