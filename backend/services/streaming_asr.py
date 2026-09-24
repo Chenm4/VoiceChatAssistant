@@ -24,6 +24,7 @@ import pyaudio
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from backend.utils.logger import get_asr_logger
+from backend.services.noise_suppression import create_noise_suppressor
 from backend.services.volcengine_streaming import VolcengineStreamingClient
 from backend.services.soniox_streaming import SonioxStreamingClient
 from config import AUDIO_CONFIG, ASR_CONFIG, SONIOX_CONFIG, VOLCENGINE_CONFIG
@@ -257,6 +258,7 @@ class StreamingASR:
     def _start_audio_capture(self):
         """启动音频捕获线程（打开麦克风）"""
         try:
+            noise_suppressor = create_noise_suppressor(self.RATE, self.CHANNELS, self.logger)
             # 如果没有预热的PyAudio实例，现在创建
             if not self.p:
                 self.p = pyaudio.PyAudio()
@@ -273,6 +275,7 @@ class StreamingASR:
             self.logger.info("🎤 [音频设备] 麦克风已打开")
             
             def capture_audio():
+                nonlocal noise_suppressor
                 buffer = b''
                 chunk_count = 0
                 
@@ -292,6 +295,12 @@ class StreamingASR:
                         
                         # 读取音频数据
                         data = self.stream.read(self.CHUNK, exception_on_overflow=False)
+                        if noise_suppressor is not None:
+                            try:
+                                data = noise_suppressor.process(data)
+                            except Exception as exc:
+                                self.logger.warning("麦克风降噪失败，后续使用原始音频: %s", exc)
+                                noise_suppressor = None
                         buffer += data
                         chunk_count += 1
                         

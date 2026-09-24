@@ -18,6 +18,7 @@ import pyaudio
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from backend.utils.logger import get_asr_logger
+from backend.services.noise_suppression import create_noise_suppressor
 from config import AUDIO_CONFIG
 
 
@@ -89,6 +90,7 @@ class AudioRecorder:
         
         self.is_recording = True
         self.frames = []
+        noise_suppressor = create_noise_suppressor(self.RATE, self.CHANNELS, self.logger)
         
         try:
             # 初始化 PyAudio
@@ -105,12 +107,19 @@ class AudioRecorder:
             
             def record() -> None:
                 """录音线程函数：持续读取音频数据"""
+                nonlocal noise_suppressor
                 while self.is_recording:
                     try:
                         data = self.stream.read(
                             self.CHUNK,
                             exception_on_overflow=False
                         )
+                        if noise_suppressor is not None:
+                            try:
+                                data = noise_suppressor.process(data)
+                            except Exception as exc:
+                                self.logger.warning("麦克风降噪失败，后续保存原始音频: %s", exc)
+                                noise_suppressor = None
                         self.frames.append(data)
                     except Exception as e:
                         self.logger.error(f"录音数据读取失败: {e}")
