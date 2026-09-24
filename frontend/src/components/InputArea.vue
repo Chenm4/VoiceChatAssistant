@@ -18,7 +18,8 @@
             @focus="isFocused = true"
             @blur="isFocused = false"
             rows="1"
-            placeholder="输入问题，Enter 发送，Shift + Enter 换行"
+            placeholder="写下问题，开始对话…"
+            aria-label="消息输入"
             class="input-textarea"
           ></textarea>
         </div>
@@ -40,6 +41,7 @@
           <span v-else class="stop-icon" aria-hidden="true"></span>
         </button>
       </div>
+      <div class="composer-hint"><span>文字 · 语音 · 截图</span><span>Enter 发送 <span class="hint-divider">/</span> Shift + Enter 换行</span></div>
     </div>
   </div>
 </template>
@@ -129,8 +131,7 @@ watch(() => props.modelValue, () => {
 
 <style scoped>
 .input-area {
-  border-bottom: 1px solid #e8edf4;
-  background: #ffffff;
+  background: #f7f9fc;
   padding: 12px 20px 14px;
   width: 100%;
   flex-shrink: 0;
@@ -184,16 +185,16 @@ watch(() => props.modelValue, () => {
   align-items: flex-end;
   width: 100%;
   padding: 6px 7px 6px 18px;
-  border: 1px solid #d9e0ea;
-  border-radius: 18px;
+  border: 1px solid rgba(148, 163, 184, .25);
+  border-radius: 20px;
   background: #ffffff;
-  box-shadow: 0 2px 8px rgba(15, 23, 42, .045);
+  box-shadow: 0 5px 18px rgba(15, 23, 42, .055);
   transition: border-color .18s ease, box-shadow .18s ease;
 }
 
 .input-container.focused {
-  border-color: #8bb8ff;
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, .10), 0 4px 14px rgba(15, 23, 42, .055);
+  border-color: rgba(99, 140, 206, .6);
+  box-shadow: 0 6px 22px rgba(37, 99, 235, .10);
 }
 
 .textarea-wrapper {
@@ -203,6 +204,7 @@ watch(() => props.modelValue, () => {
 }
 
 .input-textarea {
+  appearance: none;
   display: block;
   box-sizing: border-box;
   width: 100%;
@@ -224,6 +226,10 @@ watch(() => props.modelValue, () => {
 .input-textarea:focus {
   outline: none;
   box-shadow: none;
+}
+
+.input-textarea:focus-visible {
+  outline: none;
 }
 
 .input-textarea::placeholder {

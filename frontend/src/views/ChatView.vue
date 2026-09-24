@@ -1,5 +1,5 @@
 <template>
-  <div class="chat-view-container">
+  <div class="chat-view-container" :style="{ '--settings-panel-width': `${settingsPanelWidth}px` }">
     <!-- 会话侧边栏 -->
     <SessionSidebar
       :sessions="sessions"
@@ -18,9 +18,9 @@
       <!-- 顶部导航栏 -->
       <NavBar 
         :config="config"
+        :title="currentSession?.title"
         @open-prompt-lab="$emit('open-prompt-lab')"
         @open-session-settings="showSessionSettings = true" 
-        @clear-chat="handleClearChat" 
       />
       
       <!-- 输入区域 -->
@@ -77,6 +77,7 @@
       v-if="showSessionSettings"
       :config="config"
       :session="currentSession"
+      @resize="settingsPanelWidth = $event"
       @close="showSessionSettings = false"
       @updated="handleSessionConfigUpdated"
     />
@@ -84,8 +85,8 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
-import { ElMessageBox } from 'element-plus'
+import { ref, onMounted, onUnmounted, watch, computed, nextTick } from 'vue'
+import { ElMessageBox, ElMessage } from 'element-plus'
 import NavBar from '../components/NavBar.vue'
 import MessageList from '../components/MessageList.vue'
 import InputArea from '../components/InputArea.vue'
@@ -95,7 +96,8 @@ import SettingsModal from '../components/SettingsModal.vue'
 import SessionSidebar from '../components/SessionSidebar.vue'
 import SessionSettingsSidebar from '../components/SessionSettingsSidebar.vue'
 import api from '../utils/api'
-import { copyText } from '../utils/clipboard'
+import { blobToDataUrl, copyImageBlob, copyRichContent } from '../utils/clipboard'
+import { renderMarkdown } from '../utils/markdown'
 import { DisplayScreenCapture } from '../utils/screenCapture'
 
 defineEmits(['open-prompt-lab'])
@@ -111,6 +113,15 @@ function normalizeStreamTargets(data) {
   }))
 }
 
+function logProviderRequest(data) {
+  const request = data.request || {}
+  const model = request.parameters?.model || data.model_key || '未知模型'
+  const stage = data.stage === 'regenerate' ? '重新生成' : '发送消息'
+  console.groupCollapsed(`📤 ${stage} → ${request.provider || '供应商'} · ${model}`)
+  console.log('实际请求参数（密钥已隐藏，图片以 SHA-256 标识）:', request)
+  console.groupEnd()
+}
+
 // 状态
 const messages = ref([])
 const inputMessage = ref('')
@@ -119,6 +130,7 @@ const isRecording = ref(false)
 const isTyping = ref(false)
 const showSettings = ref(false)
 const showSessionSettings = ref(false)
+const settingsPanelWidth = ref(370)
 const messageListRef = ref(null)
 const audioStream = ref(null)
 const abortController = ref(null) // 用于取消请求
@@ -255,6 +267,11 @@ async function handleSendMessage(options = {}) {
     time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     is_typing_dots: true // 显示打字机动画
   })
+
+  // The message list deliberately does not follow every streamed token. Scroll
+  // once for an explicit send so the optimistic text/image is visible now.
+  await nextTick()
+  messageListRef.value?.scrollToBottom()
   
   isTyping.value = true
   isSending.value = true
@@ -322,7 +339,9 @@ async function handleSendMessage(options = {}) {
         const jsonStr = trimmedLine.slice(6)
         const data = JSON.parse(jsonStr)
         
-        if (data.type === 'multi_model_start') {
+        if (data.type === 'provider_request') {
+          logProviderRequest(data)
+        } else if (data.type === 'multi_model_start') {
           // 多模型模式开始
           console.log('🎯 多模型模式:', data.models)
           
@@ -545,6 +564,13 @@ async function handleCaptureAndSend() {
       await selectCaptureSource()
     }
     const frame = await capture.capture()
+    try {
+      await copyImageBlob(frame.clipboardBlob)
+    } catch (clipboardError) {
+      // Clipboard permission/support must not prevent the screenshot question.
+      console.warn('截图已生成，但复制到剪贴板失败:', clipboardError)
+      showNotification('截图已发送，但浏览器未允许写入图片剪贴板', 'warning', 3500)
+    }
     const attachment = await uploadScreenshot(frame)
     captureConnected.value = true
     captureSourceName.value = capture.label
@@ -938,7 +964,7 @@ async function handleUpdateTitle(sessionId, newTitle) {
   }
 }
 
-function formatAssistantMessages(message, responseNumber) {
+function getAssistantEntries(message) {
   const parallel = message.parallel_models || message.models
   if (Array.isArray(parallel) && parallel.length > 0) {
     return parallel
@@ -947,48 +973,135 @@ function formatAssistantMessages(message, responseNumber) {
         const model = item.model_info?.name || item.model || '模型'
         const source = item.model_info?.provider || item.source_name
         const label = source && source !== 'unknown' ? `${source} · ${model}` : model
-        return `【返回 ${responseNumber} · ${label}】\n${item.content}`
+        return { label, content: item.content }
       })
   }
 
   const model = message.model_info?.name
   const source = message.model_info?.provider
   const modelLabel = model && source && source !== 'unknown' ? `${source} · ${model}` : model
-  const label = modelLabel ? `【返回 ${responseNumber} · ${modelLabel}】` : `【返回 ${responseNumber}】`
-  return message.content ? [`${label}\n${message.content}`] : []
+  return message.content
+    ? [{ label: modelLabel || 'AI', content: message.content }]
+    : []
 }
 
-function buildSessionCopyText(session, command) {
-  const sections = []
-  let sentNumber = 0
-  let responseNumber = 0
-
+function groupSessionMessages(session) {
+  const groups = []
+  const groupsByUserId = new Map()
+  let latestGroup = null
   for (const message of session.messages || []) {
     if (message.role === 'user') {
-      sentNumber += 1
-      if (command !== 'copy-assistant' && message.content) {
-        sections.push(`【发送 ${sentNumber}】\n${message.content}`)
-      }
+      latestGroup = { question: message, answers: [] }
+      groups.push(latestGroup)
+      if (message.id) groupsByUserId.set(message.id, latestGroup)
     } else if (message.role === 'assistant') {
-      responseNumber += 1
-      if (command !== 'copy-user') {
-        sections.push(...formatAssistantMessages(message, responseNumber))
+      const group = groupsByUserId.get(message.parent_id) || latestGroup
+      if (group) group.answers.push(...getAssistantEntries(message))
+    }
+  }
+  return groups
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;')
+}
+
+function clipboardMarkdownHtml(content) {
+  const container = document.createElement('div')
+  container.innerHTML = renderMarkdown(content || '')
+  container.querySelectorAll('.copy-button').forEach(button => button.remove())
+  return container.innerHTML
+}
+
+function sessionAttachmentUrl(sessionId, attachment) {
+  return `/api/attachments/${encodeURIComponent(sessionId)}/${encodeURIComponent(attachment.id)}`
+}
+
+async function buildExportAttachments(sessionId, attachments = []) {
+  const result = []
+  for (const [index, attachment] of attachments.entries()) {
+    const relativeUrl = sessionAttachmentUrl(sessionId, attachment)
+    const absoluteUrl = new URL(relativeUrl, window.location.origin).href
+    let imageUrl = absoluteUrl
+    try {
+      const response = await fetch(relativeUrl)
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      imageUrl = await blobToDataUrl(await response.blob())
+    } catch (error) {
+      console.warn('导出时无法内嵌图片，保留图片链接:', error)
+    }
+    result.push({ label: `截图 ${index + 1}`, absoluteUrl, imageUrl })
+  }
+  return result
+}
+
+async function buildSessionCopyDocument(session, command) {
+  const textSections = []
+  const htmlSections = []
+  const groups = groupSessionMessages(session)
+
+  for (const [index, group] of groups.entries()) {
+    const number = index + 1
+    const includeQuestion = command !== 'copy-assistant'
+    const includeAnswers = command !== 'copy-user'
+    const attachments = includeQuestion
+      ? await buildExportAttachments(session.id, group.question.attachments)
+      : []
+
+    const textParts = [`# 问题 ${number}`]
+    const htmlParts = [`<h1>问题 ${number}</h1>`]
+
+    if (includeQuestion) {
+      if (group.question.content) {
+        textParts.push(group.question.content)
+        htmlParts.push(clipboardMarkdownHtml(group.question.content))
       }
+      if (attachments.length > 0) {
+        textParts.push(attachments.map(image => (
+          `![${image.label}](${image.absoluteUrl})`
+        )).join('\n'))
+        htmlParts.push(attachments.map(image => (
+          `<p><img src="${escapeHtml(image.imageUrl)}" alt="${escapeHtml(image.label)}" style="max-width:100%;height:auto;" /></p>`
+        )).join(''))
+      }
+    }
+
+    if (includeAnswers) {
+      for (const answer of group.answers) {
+        textParts.push(`## 回答 · ${answer.label}`, answer.content)
+        htmlParts.push(
+          `<h2>回答 · ${escapeHtml(answer.label)}</h2>`,
+          clipboardMarkdownHtml(answer.content)
+        )
+      }
+    }
+
+    if ((includeQuestion && (group.question.content || attachments.length)) || (includeAnswers && group.answers.length)) {
+      textSections.push(textParts.join('\n\n'))
+      htmlSections.push(`<article>${htmlParts.join('')}</article>`)
     }
   }
 
-  return sections.join('\n\n')
+  return {
+    text: textSections.join('\n\n---\n\n'),
+    html: `<div>${htmlSections.join('<hr>')}</div>`
+  }
 }
 
 async function handleCopySession(sessionId, command) {
   try {
     const session = await api.get(`/sessions/${sessionId}`)
-    const text = buildSessionCopyText(session, command)
-    if (!text) {
+    const document = await buildSessionCopyDocument(session, command)
+    if (!document.text) {
       showNotification('该会话没有可复制的对应消息', 'warning')
       return
     }
-    await copyText(text)
+    await copyRichContent(document.text, document.html)
     const labels = {
       'copy-user': '发送消息',
       'copy-assistant': '返回消息',
@@ -1133,7 +1246,9 @@ async function handleRegenerateMessage({ messageId, newContent }) {
         const jsonStr = trimmedLine.slice(6)
         const data = JSON.parse(jsonStr)
         
-        if (data.type === 'multi_model_start') {
+        if (data.type === 'provider_request') {
+          logProviderRequest(data)
+        } else if (data.type === 'multi_model_start') {
           console.log('🎯 多模型模式:', data.models)
           
           // 创建一个多模型容器消息
@@ -1264,38 +1379,7 @@ watch(currentSessionId, async (newId) => {
 
 // 通知
 function showNotification(message, type = 'info', duration = 3000) {
-  const colors = {
-    'success': 'bg-green-500',
-    'error': 'bg-red-500',
-    'info': 'bg-blue-500'
-  }
-  
-  const notification = document.createElement('div')
-  notification.className = `fixed top-4 right-4 ${colors[type]} text-white px-6 py-3 rounded-lg shadow-lg z-50 max-w-md`
-  notification.style.animation = 'fadeIn 0.3s ease-in'
-  notification.style.wordWrap = 'break-word'
-  notification.style.whiteSpace = 'pre-wrap'
-  
-  // 如果是错误类型，添加关闭按钮
-  if (type === 'error') {
-    notification.innerHTML = `
-      <div class="flex items-start gap-3">
-        <div class="flex-1">${message}</div>
-        <button onclick="this.parentElement.parentElement.remove()" class="text-white hover:text-gray-200 font-bold text-lg leading-none">&times;</button>
-      </div>
-    `
-  } else {
-    notification.textContent = message
-  }
-  
-  document.body.appendChild(notification)
-  
-  setTimeout(() => {
-    if (notification.parentElement) {
-      notification.style.animation = 'fadeOut 0.3s ease-out'
-      setTimeout(() => notification.remove(), 300)
-    }
-  }, duration)
+  ElMessage({ message, type, duration, showClose: type === 'error', grouping: true })
 }
 
 // 解析快捷键配置

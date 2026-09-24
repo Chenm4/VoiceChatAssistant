@@ -17,12 +17,12 @@ function waitForVideo(video) {
   })
 }
 
-function canvasToBlob(canvas) {
+function canvasToBlob(canvas, type = 'image/webp', quality = 0.92) {
   return new Promise((resolve, reject) => {
     canvas.toBlob(blob => {
       if (blob) resolve(blob)
       else reject(new Error('生成截图失败'))
-    }, 'image/webp', 0.92)
+    }, type, quality)
   })
 }
 
@@ -98,7 +98,12 @@ export class DisplayScreenCapture {
     canvas.height = height
     const context = canvas.getContext('2d', { alpha: false })
     context.drawImage(this.video, 0, 0, width, height)
-    return { blob: await canvasToBlob(canvas), width, height }
+    const [blob, clipboardBlob] = await Promise.all([
+      canvasToBlob(canvas),
+      // Chromium's image clipboard implementation is most reliable with PNG.
+      canvasToBlob(canvas, 'image/png')
+    ])
+    return { blob, clipboardBlob, width, height }
   }
 
   stop() {

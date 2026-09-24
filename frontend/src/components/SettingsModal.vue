@@ -1,22 +1,23 @@
 <template>
   <div 
-    class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
+    role="dialog" aria-modal="true" aria-label="全局设置"
+    class="settings-modal fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
     @click.self="$emit('close')"
   >
-    <div class="bg-white rounded-xl shadow-2xl max-w-2xl w-full mx-4 p-6 max-h-[90vh] overflow-y-auto">
+    <div class="settings-modal-card bg-white rounded-xl shadow-2xl max-w-2xl w-full mx-4 p-6 max-h-[90vh] overflow-y-auto">
       <div class="flex items-center justify-between mb-6">
         <h2 class="text-xl font-semibold text-gray-800">
-          <i class="fas fa-cog text-blue-600"></i> API 配置
+          <AppIcon name="cog" class="  text-blue-600" /> API 配置
         </h2>
-        <button @click="$emit('close')" class="text-gray-400 hover:text-gray-600">
-          <i class="fas fa-times text-xl"></i>
+        <button aria-label="关闭全局设置" @click="$emit('close')" class="text-gray-400 hover:text-gray-600">
+          <AppIcon name="times" class="  text-xl" />
         </button>
       </div>
       
       <!-- 当前使用的配置 -->
       <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
         <h3 class="text-sm font-semibold text-blue-800 mb-3">
-          <i class="fas fa-check-circle"></i> 当前配置
+          <AppIcon name="check-circle" class=" " /> 当前配置
         </h3>
         
         <div class="space-y-3">
@@ -50,14 +51,14 @@
           @click="handleSwitch" 
           class="mt-4 w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
         >
-          <i class="fas fa-sync-alt"></i> 切换配置
+          <AppIcon name="sync-alt" class=" " /> 切换配置
         </button>
       </div>
       
       <!-- 管理配置源 -->
       <div class="border border-gray-200 rounded-lg p-4">
         <h3 class="text-sm font-semibold text-gray-800 mb-4">
-          <i class="fas fa-database"></i> 管理配置源
+          <AppIcon name="database" class=" " /> 管理配置源
         </h3>
         
         <div class="space-y-4">
@@ -79,7 +80,7 @@
                   @click="toggleEdit(index)"
                   class="text-sm text-blue-600 hover:text-blue-800"
                 >
-                  <i :class="editingIndex === index ? 'fas fa-times' : 'fas fa-edit'"></i>
+                  <AppIcon :name="editingIndex === index ? 'times' : 'edit'"  />
                   {{ editingIndex === index ? '取消' : '编辑' }}
                 </button>
                 <button 
@@ -88,7 +89,7 @@
                   :disabled="localConfig.sources.length === 1"
                   :class="{ 'opacity-50 cursor-not-allowed': localConfig.sources.length === 1 }"
                 >
-                  <i class="fas fa-trash"></i>
+                  <AppIcon name="trash" class=" " />
                   删除
                 </button>
               </div>
@@ -130,21 +131,21 @@
                 @click="handleUpdateSource(source)"
                 class="w-full px-3 py-2 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700 transition"
               >
-                <i class="fas fa-save"></i> 保存修改
+                <AppIcon name="save" class=" " /> 保存修改
               </button>
             </div>
             
             <div v-else class="text-sm text-gray-600 space-y-1">
               <div>
-                <i class="fas fa-key w-4"></i>
+                <AppIcon name="key" class="  w-4" />
                 API Key: {{ source.api_key ? '已配置 ✓' : '未配置 ✗' }}
               </div>
               <div>
-                <i class="fas fa-link w-4"></i>
+                <AppIcon name="link" class="  w-4" />
                 {{ source.base_url }}
               </div>
               <div>
-                <i class="fas fa-list w-4"></i>
+                <AppIcon name="list" class="  w-4" />
                 {{ source.models.length }} 个模型
               </div>
             </div>
@@ -155,7 +156,7 @@
       <!-- 新增配置源 -->
       <div class="border border-gray-200 rounded-lg p-4 mt-6">
         <h3 class="text-sm font-semibold text-gray-800 mb-4">
-          <i class="fas fa-plus-circle"></i> 新增配置源
+          <AppIcon name="plus-circle" class=" " /> 新增配置源
         </h3>
         <div class="space-y-3">
           <div>
@@ -198,7 +199,7 @@
             @click="handleAddSource"
             class="w-full px-3 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 transition"
           >
-            <i class="fas fa-plus"></i> 新增配置
+            <AppIcon name="plus" class=" " /> 新增配置
           </button>
         </div>
       </div>
@@ -229,7 +230,17 @@ const props = defineProps({
 
 const emit = defineEmits(['close', 'refresh'])
 
-const localConfig = ref({ ...props.config })
+function cloneConfig(config) {
+  return {
+    ...config,
+    sources: (config.sources || []).map(source => ({
+      ...source,
+      models: [...(source.models || [])]
+    }))
+  }
+}
+
+const localConfig = ref(cloneConfig(props.config))
 const selectedSource = ref(props.config.current_source)
 const selectedModel = ref(props.config.current_model)
 const editingIndex = ref(-1)
@@ -242,7 +253,7 @@ const newSource = ref({
 })
 
 watch(() => props.config, (newConfig) => {
-  localConfig.value = { ...newConfig }
+  localConfig.value = cloneConfig(newConfig)
   selectedSource.value = newConfig.current_source
   selectedModel.value = newConfig.current_model
 }, { deep: true })
@@ -280,6 +291,10 @@ async function handleSwitch() {
 }
 
 async function handleUpdateSource(source) {
+  if (source.api_key && !/^[\x00-\x7F]*$/.test(source.api_key)) {
+    ElMessage.error('API Key 只能包含 ASCII 字符，请检查是否误粘贴了中文内容')
+    return
+  }
   try {
     const response = await api.post('/config/update', source)
     
@@ -321,6 +336,11 @@ async function handleAddSource() {
 
 function toggleEdit(index) {
   if (editingIndex.value === index) {
+    const original = props.config.sources[index]
+    localConfig.value.sources[index] = {
+      ...original,
+      models: [...(original.models || [])]
+    }
     editingIndex.value = -1
   } else {
     editingIndex.value = index

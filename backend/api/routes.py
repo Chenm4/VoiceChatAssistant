@@ -4,6 +4,7 @@ API 路由定义
 
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import os
@@ -44,6 +45,7 @@ from backend.services.audio_recorder import AudioRecorder
 from backend.services.voice_recognizer import VoiceRecognizer
 from backend.services.streaming_asr import StreamingASR
 from backend.services.chat_context import build_scoped_request
+from backend.services.token_budget import count_tokens, newest_tokens
 from backend.services.session_prompt import (
     compose_session_system_prompt,
     create_default_session_config,
@@ -127,6 +129,52 @@ def _content_log_preview(content: Any, preview_chars: int, show_full: bool) -> s
     return shown.replace("\n", "\\n") + image_suffix
 
 
+def _redact_request_secrets(value: Any) -> Any:
+    """Remove credentials while preserving the complete request structure."""
+    if isinstance(value, dict):
+        if value.get("type") == "image_url" and isinstance(value.get("image_url"), dict):
+            image_url = value["image_url"]
+            url = image_url.get("url", "")
+            if isinstance(url, str) and url.startswith("data:") and ";base64," in url:
+                header, encoded = url.split(",", 1)
+                image_bytes = base64.b64decode(encoded)
+                return _redact_request_secrets({
+                    **{key: _redact_request_secrets(item) for key, item in value.items() if key != "image_url"},
+                    "image_url": {
+                        **{key: _redact_request_secrets(item) for key, item in image_url.items() if key != "url"},
+                        "url": {
+                            "type": "image",
+                            "mime_type": header[5:].split(";", 1)[0],
+                            "sha256": hashlib.sha256(image_bytes).hexdigest(),
+                        },
+                    },
+                })
+        return {
+            key: ("[REDACTED]" if re.search(
+                r"api[_-]?key|authorization|access[_-]?token|secret|password",
+                str(key), re.IGNORECASE
+            ) else _redact_request_secrets(item))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_request_secrets(item) for item in value]
+    return value
+
+
+def log_provider_request(source: ConfigSource, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Log all Chat Completions parameters immediately before the SDK call."""
+    payload = _redact_request_secrets({
+        "provider": source.name,
+        "base_url": source.base_url,
+        "endpoint": "chat.completions.create",
+        "parameters": params,
+    })
+    logger.info("📤 [供应商请求参数]\n%s", json.dumps(
+        payload, ensure_ascii=False, indent=2, default=str
+    ))
+    return payload
+
+
 def log_model_request_context(
     model: str,
     messages: List[Dict[str, str]],
@@ -147,15 +195,23 @@ def log_model_request_context(
     user_count = sum(1 for message in messages if message.get("role") == "user")
     assistant_count = sum(1 for message in messages if message.get("role") == "assistant")
     system_count = sum(1 for message in messages if message.get("role") == "system")
-    estimated_tokens = max(1, total_chars // 4) if total_chars else 0
+    token_model = model.split("::")[-1]
+    text_tokens = sum(
+        count_tokens(str(message.get("content", "")), token_model)
+        if isinstance(message.get("content", ""), str)
+        else sum(count_tokens(str(part.get("text", "")), token_model)
+                 for part in message.get("content", [])
+                 if isinstance(part, dict) and part.get("type") == "text")
+        for message in messages
+    )
     context_settings = context_settings or CHAT_CONTEXT_CONFIG
     logger.info(
         f"📨 [模型请求上下文] label={label}, model={model}, "
         f"messages={len(messages)} (system={system_count}, user={user_count}, "
         f"assistant={assistant_count}), chars={total_chars}, "
-        f"estimated_tokens≈{estimated_tokens}, "
+        f"text_tokens={text_tokens} (不含图片), "
         f"max_history_turns={context_settings.get('max_history_turns', 15)}, "
-        f"max_history_chars={context_settings.get('max_history_chars', 12000)}, "
+        f"max_history_tokens={context_settings.get('max_history_chars', 12000)}, "
         f"include_assistant={context_settings.get('include_assistant_history', False)}"
     )
 
@@ -192,15 +248,16 @@ def resolve_chat_context_config(session_config: Optional[SessionConfig]) -> Dict
 
 def trim_history_context(
     messages: List[Dict[str, str]],
-    max_chars: int,
+    max_tokens: int,
+    model: str = "",
 ) -> List[Dict[str, str]]:
-    """Trim historical API messages to a bounded character budget.
+    """Trim historical API messages to a bounded token budget.
 
     System messages are always retained. Older user turns are removed first;
     when one remaining message is itself larger than the budget, keep its
     newest tail rather than dropping the whole conversation.
     """
-    if max_chars <= 0:
+    if max_tokens <= 0:
         return messages
 
     system_messages = [
@@ -222,18 +279,18 @@ def trim_history_context(
     if current_turn:
         turns.append(current_turn)
 
-    def turns_chars() -> int:
+    def turns_tokens() -> int:
         return sum(
-            len(str(message.get("content", "")))
+            count_tokens(str(message.get("content", "")), model)
             for turn in turns
             for message in turn
         )
 
     # Drop complete oldest turns first, but always retain the newest turn.
-    while len(turns) > 1 and turns_chars() > max_chars:
+    while len(turns) > 1 and turns_tokens() > max_tokens:
         turns.pop(0)
 
-    if turns and turns_chars() > max_chars:
+    if turns and turns_tokens() > max_tokens:
         # If the newest turn itself is too large, preserve the user question
         # first and use any remaining budget for assistant text. This keeps a
         # meaningful latest question even when it is very long.
@@ -245,17 +302,17 @@ def trim_history_context(
         )
         user_message = turn[user_index]
         user_content = str(user_message.get("content", ""))
-        kept_user = user_content[-max_chars:]
-        remaining = max_chars - len(kept_user)
+        kept_user = newest_tokens(user_content, max_tokens, model)
+        remaining = max_tokens - count_tokens(kept_user, model)
         bounded_turn = [{**user_message, "content": kept_user}]
         if remaining > 0:
             for message in turn[user_index + 1:]:
                 content = str(message.get("content", ""))
                 if not content:
                     continue
-                kept = content[-remaining:]
+                kept = newest_tokens(content, remaining, model)
                 bounded_turn.append({**message, "content": kept})
-                remaining -= len(kept)
+                remaining -= count_tokens(kept, model)
                 if remaining <= 0:
                     break
         turns[0] = bounded_turn
@@ -347,18 +404,39 @@ api_config = ConfigModel(
 )
 
 
-def get_chat_completion_extra_params(source: Optional[ConfigSource], model: str) -> Dict[str, Any]:
+def get_chat_completion_extra_params(
+    source: Optional[ConfigSource],
+    model: str,
+    reasoning_effort: str = "none",
+) -> Dict[str, Any]:
     """Return provider-specific Chat Completions options."""
     source_name = (source.name if source else "").lower()
     base_url = (source.base_url if source else api_config.base_url).lower()
     model_name = (model or "").lower()
+    effort = reasoning_effort if reasoning_effort in {
+        "none", "minimal", "low", "medium", "high", "xhigh"
+    } else "none"
     
     if (
         source_name == "qwen"
         or "dashscope.aliyuncs.com" in base_url
         or model_name.startswith("qwen")
     ):
-        return {"extra_body": {"enable_thinking": False}}
+        if effort == "none":
+            return {"extra_body": {"enable_thinking": False}}
+        # openai 1.x forwards extra_body at the JSON top level. DashScope's
+        # OpenAI-compatible endpoint accepts reasoning_effort there.
+        return {"extra_body": {"reasoning_effort": effort}}
+
+    if source_name == "openrouter" or "openrouter.ai" in base_url:
+        return {"extra_body": {"reasoning": {"effort": effort}}}
+
+    openai_reasoning_model = bool(re.match(r"^(gpt-[56]|o[134](?:-|$))", model_name))
+    if (
+        (source_name == "openai" or "api.openai.com" in base_url)
+        and openai_reasoning_model
+    ):
+        return {"extra_body": {"reasoning_effort": effort}}
     
     return {}
 
@@ -372,7 +450,15 @@ def resolve_model_targets(
     if requested_model:
         if "::" in requested_model:
             requested_source, model_name = requested_model.split("::", 1)
-            requested_targets = [(requested_source, model_name)]
+            configured_target = next((
+                target for target in (session_config.model_targets if session_config else [])
+                if target.source_name == requested_source and target.model == model_name
+            ), None)
+            requested_targets = [(
+                requested_source,
+                model_name,
+                configured_target.reasoning_effort if configured_target else "none",
+            )]
         else:
             matching_source = next(
                 (source for source in config_sources if requested_model in source.models),
@@ -383,23 +469,31 @@ def resolve_model_targets(
                     status_code=400,
                     detail=f"找不到模型 {requested_model} 对应的配置源",
                 )
-            requested_targets = [(matching_source.name, requested_model)]
+            configured_target = next((
+                target for target in (session_config.model_targets if session_config else [])
+                if target.source_name == matching_source.name and target.model == requested_model
+            ), None)
+            requested_targets = [(
+                matching_source.name,
+                requested_model,
+                configured_target.reasoning_effort if configured_target else "none",
+            )]
     elif session_config and session_config.model_targets:
         requested_targets = [
-            (target.source_name, target.model)
+            (target.source_name, target.model, target.reasoning_effort)
             for target in session_config.model_targets
         ]
     elif session_config and session_config.models:
         legacy_source = session_config.source_name or current_config.current_source
         requested_targets = [
-            (legacy_source, model_name) for model_name in session_config.models
+            (legacy_source, model_name, "none") for model_name in session_config.models
         ]
     else:
-        requested_targets = [(current_config.current_source, api_config.model)]
+        requested_targets = [(current_config.current_source, api_config.model, "none")]
 
     resolved = []
     seen = set()
-    for source_name, model_name in requested_targets:
+    for source_name, model_name, reasoning_effort in requested_targets:
         key = f"{source_name}::{model_name}"
         if key in seen:
             continue
@@ -422,6 +516,7 @@ def resolve_model_targets(
             "source_name": source_name,
             "model": model_name,
             "source": source,
+            "reasoning_effort": reasoning_effort,
         })
 
     if not resolved:
@@ -435,6 +530,7 @@ def public_model_targets(targets: List[Dict[str, Any]]) -> List[Dict[str, str]]:
             "key": target["key"],
             "source_name": target["source_name"],
             "model": target["model"],
+            "reasoning_effort": target["reasoning_effort"],
         }
         for target in targets
     ]
@@ -1274,7 +1370,7 @@ async def chat(request: ChatRequest):
                     api_messages.append({"role": "assistant", "content": assistant_content})
 
         api_messages = trim_history_context(
-            api_messages, context_settings["max_history_chars"]
+            api_messages, context_settings["max_history_chars"], target_model
         )
         
         rendered_user_prompt = render_session_user_prompt(
@@ -1355,14 +1451,24 @@ async def chat(request: ChatRequest):
                         )
                         
                         # 异步调用模型（流式）
-                        stream = await client.chat.completions.create(
+                        request_params = dict(
                             model=model_name,
                             messages=model_messages,
                             temperature=session_config.temperature if session_config else 0.7,
                             top_p=session_config.top_p if session_config else 1.0,
                             stream=True,
-                            **get_chat_completion_extra_params(source, model_name)
+                            **get_chat_completion_extra_params(
+                                source, model_name, target['reasoning_effort']
+                            )
                         )
+                        request_preview = log_provider_request(source, request_params)
+                        await chunk_queue.put({
+                            "type": "provider_request",
+                            "stage": "chat",
+                            "model_key": target["key"],
+                            "request": request_preview,
+                        })
+                        stream = await client.chat.completions.create(**request_params)
                         
                         chunk_count = 0
                         async for chunk in stream:
@@ -1528,14 +1634,19 @@ async def chat(request: ChatRequest):
                 )
                 
                 # 调用 OpenAI API（流式）
-                stream = client.chat.completions.create(
+                request_params = dict(
                     model=model_to_use,
                     messages=model_messages,
                     temperature=session_config.temperature if session_config else 0.7,
                     top_p=session_config.top_p if session_config else 1.0,
                     stream=True,
-                    **get_chat_completion_extra_params(source_to_use, model_to_use)
+                    **get_chat_completion_extra_params(
+                        source_to_use, model_to_use, target['reasoning_effort']
+                    )
                 )
+                request_preview = log_provider_request(source_to_use, request_params)
+                yield f"data: {json.dumps({'type': 'provider_request', 'stage': 'chat', 'model_key': target['key'], 'request': request_preview}, ensure_ascii=False)}\n\n"
+                stream = client.chat.completions.create(**request_params)
                 
                 assistant_message = ''
                 chunk_count = 0
@@ -2538,7 +2649,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                     api_messages.append({"role": "assistant", "content": assistant_content})
 
         api_messages = trim_history_context(
-            api_messages, context_settings["max_history_chars"]
+            api_messages, context_settings["max_history_chars"], target_model
         )
         
         rendered_user_prompt = render_session_user_prompt(
@@ -2616,14 +2727,24 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                             base_url=source.base_url
                         )
                         
-                        stream = await client.chat.completions.create(
+                        request_params = dict(
                             model=model_name,
                             messages=model_messages,
                             temperature=session_config.temperature if session_config else 0.7,
                             top_p=session_config.top_p if session_config else 1.0,
                             stream=True,
-                            **get_chat_completion_extra_params(source, model_name)
+                            **get_chat_completion_extra_params(
+                                source, model_name, target['reasoning_effort']
+                            )
                         )
+                        request_preview = log_provider_request(source, request_params)
+                        await chunk_queue.put({
+                            "type": "provider_request",
+                            "stage": "regenerate",
+                            "model_key": target["key"],
+                            "request": request_preview,
+                        })
+                        stream = await client.chat.completions.create(**request_params)
                         
                         chunk_count = 0
                         async for chunk in stream:
@@ -2791,14 +2912,19 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                     base_url=source_to_use.base_url
                 )
                 
-                stream = client.chat.completions.create(
+                request_params = dict(
                     model=model_to_use,
                     messages=model_messages,
                     temperature=session_config.temperature if session_config else 0.7,
                     top_p=session_config.top_p if session_config else 1.0,
                     stream=True,
-                    **get_chat_completion_extra_params(source_to_use, model_to_use)
+                    **get_chat_completion_extra_params(
+                        source_to_use, model_to_use, target['reasoning_effort']
+                    )
                 )
+                request_preview = log_provider_request(source_to_use, request_params)
+                yield f"data: {json.dumps({'type': 'provider_request', 'stage': 'regenerate', 'model_key': target['key'], 'request': request_preview}, ensure_ascii=False)}\n\n"
+                stream = client.chat.completions.create(**request_params)
                 
                 assistant_message = ''
                 chunk_count = 0

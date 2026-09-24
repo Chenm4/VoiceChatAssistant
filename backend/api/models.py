@@ -2,7 +2,7 @@
 API 数据模型
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Literal
 import time
 
@@ -19,6 +19,13 @@ class ConfigSource(BaseModel):
     api_key: str
     models: List[str]
     base_url: str
+
+    @validator("api_key")
+    def api_key_must_be_ascii(cls, value: str) -> str:
+        """HTTP Authorization headers cannot contain non-ASCII API keys."""
+        if value and not value.isascii():
+            raise ValueError("API Key 只能包含 ASCII 字符，请检查是否误粘贴了中文内容")
+        return value
 
 
 class ConfigList(BaseModel):
@@ -64,6 +71,11 @@ class ModelTarget(BaseModel):
     """One model together with the API configuration source that serves it."""
     source_name: str
     model: str
+    # Keep the setting on the target because one session can call models from
+    # several providers at the same time.
+    reasoning_effort: Literal[
+        "none", "minimal", "low", "medium", "high", "xhigh"
+    ] = "none"
 
 
 class ChatMessage(BaseModel):
@@ -112,6 +124,7 @@ class SessionConfig(BaseModel):
     background_context: Optional[str] = None
     # 上下文控制：None 表示使用 config.py 中的全局默认值。
     max_history_turns: Optional[int] = Field(default=None, ge=1, le=100)
+    # 历史字段名保留兼容旧会话；数值现在按 tokenizer 的 token 数解释。
     max_history_chars: Optional[int] = Field(default=None, ge=1000, le=200000)
     include_assistant_history: Optional[bool] = None
     # 截图答题时使用的会话级基础指令；输入框文字会作为补充要求附加。

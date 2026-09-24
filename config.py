@@ -72,13 +72,12 @@ ASR_CONFIG = {
 
 # ==================== 聊天上下文配置 ====================
 # 一轮 = 一条用户消息。默认只保留最近 15 轮用户问题，并限制历史内容
-# 为 12000 字符，避免把大量内容重复发送给模型；如需完整问答上下文，
+# 为 12000 token，避免把大量内容重复发送给模型；如需完整问答上下文，
 # 可设置 CHAT_INCLUDE_ASSISTANT_HISTORY=1。
 CHAT_CONTEXT_CONFIG = {
     "max_history_turns": _env_int("CHAT_MAX_HISTORY_TURNS", 15, 1, 100),
-    # Character cap for historical messages (rough token estimate only; the
-    # actual tokenizer depends on the selected model).
-    "max_history_chars": _env_int("CHAT_MAX_HISTORY_CHARS", 12000, 1000, 200000),
+    # Serialized field name is retained for compatibility with saved sessions.
+    "max_history_chars": _env_int("CHAT_MAX_HISTORY_TOKENS", _env_int("CHAT_MAX_HISTORY_CHARS", 12000, 1000, 200000), 1000, 200000),
     "include_assistant_history": _env_bool("CHAT_INCLUDE_ASSISTANT_HISTORY", False),
     "debug_context": _env_bool("CHAT_DEBUG_CONTEXT", True),
     "debug_context_full": _env_bool("CHAT_DEBUG_CONTEXT_FULL", False),

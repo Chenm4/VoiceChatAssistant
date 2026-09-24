@@ -45,6 +45,8 @@ logs/
 config.py
 .env
 .env.local
+.certs/
+.tools/
 
 # IDE
 .vscode/

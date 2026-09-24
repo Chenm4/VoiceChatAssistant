@@ -4,9 +4,9 @@
       <div>
         <div class="lab-title-row">
           <el-button text @click="$emit('back')">← 返回聊天</el-button>
-          <h1>八股回答提示词实验室</h1>
+          <h1>提示词实验室</h1>
         </div>
-        <p>批量比较 Qwen 模型与提示词，找到真正适合现场口述、可以直接背的回答。</p>
+        <p>比较模型与提示词，让每一次表达更清晰。</p>
       </div>
       <el-button @click="loadRuns" :loading="loadingRuns">刷新历史</el-button>
     </header>

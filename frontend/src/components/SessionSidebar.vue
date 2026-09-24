@@ -8,9 +8,10 @@
       :title="isCollapsed ? '展开会话栏' : '收起会话栏'"
       :aria-label="isCollapsed ? '展开会话栏' : '收起会话栏'"
     >
-      <i class="fas" :class="isCollapsed ? 'fa-chevron-right' : 'fa-chevron-left'"></i>
+      <AppIcon :name="isCollapsed ? 'chevron-right' : 'chevron-left'" class=""  />
     </button>
 
+    <div v-if="!isCollapsed" class="sidebar-brand"><span class="brand-mark"><AudioLines :size="22" /></span><div><strong>轻语</strong><span>VOICE ASSISTANT</span></div></div>
     <!-- 顶部工具栏 -->
     <div class="sidebar-header" v-if="!isCollapsed">
       <div class="header-buttons">
@@ -22,26 +23,34 @@
         >
           新建对话
         </el-button>
-        <el-button 
-          @click="$emit('open-settings')"
-          :icon="Setting"
-          style="flex: 1"
-        >
-          全局设置
-        </el-button>
+
       </div>
     </div>
 
+    <div v-if="!isCollapsed" class="sidebar-search" role="search">
+      <Search :size="16" aria-hidden="true" />
+      <input v-model="searchQuery" placeholder="搜索标题与内容" aria-label="搜索对话标题与内容" @keydown.esc="searchQuery = ''" />
+      <LoaderCircle v-if="isSearching" :size="14" class="search-spinner" aria-label="正在搜索" />
+      <button v-else-if="searchQuery" class="search-clear" aria-label="清除搜索" @click="searchQuery = ''"><X :size="14" /></button>
+    </div>
+    <div v-if="!isCollapsed" class="sidebar-section-label">{{ searchQuery.trim() ? '搜索结果' : '最近对话' }} <span>{{ searchQuery.trim() ? filteredSessions.length : sessions.length }}</span></div>
+    <div v-if="!isCollapsed && searchQuery.trim()" class="search-status" role="status" aria-live="polite">
+      <span v-if="isSearching">正在搜索全部对话…</span>
+      <template v-else-if="searchFailures"><span>部分对话未能加载</span><button @click="runSearch">重试</button></template>
+      <span v-else>已搜索标题和消息正文</span>
+    </div>
     <!-- 会话列表容器 -->
     <div v-if="!isCollapsed" class="session-list-wrapper">
       <!-- 会话列表 -->
       <div class="session-list">
         <div
-          v-for="session in sessions"
+          v-for="session in filteredSessions"
           :key="session.id"
           class="session-item"
           :class="{ active: session.id === currentSessionId }"
           @click="handleSwitchSession(session.id)"
+          role="button" tabindex="0" @keydown.enter.self="handleSwitchSession(session.id)" @keydown.space.self.prevent="handleSwitchSession(session.id)"
+          :aria-current="session.id === currentSessionId ? 'true' : undefined"
         >
           <div class="session-content">
             <div v-if="editingSessionId === session.id" class="session-title-edit">
@@ -56,7 +65,8 @@
               >
             </div>
             <div v-else class="session-info">
-              <div class="session-title">{{ session.title }}</div>
+              <div class="session-title" :title="session.title">{{ session.title }}</div>
+              <p v-if="session.snippet" class="search-snippet"><span>内容 · </span><template v-for="(part, index) in highlightedSnippet(session.snippet)" :key="index"><mark v-if="part.match">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></p>
               <div class="session-meta">
                 <span class="message-count">
                   {{ session.message_count ?? session.messages?.length ?? 0 }} 条消息
@@ -64,7 +74,7 @@
                 <span v-if="getAudioCount(session) > 0" class="audio-count">
                   {{ getAudioCount(session) }} 段录音
                 </span>
-                <span class="time">{{ formatTime(session.updated_at) }}</span>
+                <span class="time" :title="formatTime(session.updated_at)">{{ formatShortTime(session.updated_at) }}</span>
               </div>
             </div>
           </div>
@@ -114,13 +124,14 @@
           </div>
         </div>
 
-        <div v-if="sessions.length === 0" class="empty-state">
-          <i class="fas fa-comments text-4xl text-gray-300 mb-4"></i>
-          <p class="text-gray-400">暂无对话</p>
+        <div v-if="filteredSessions.length === 0 && !isSearching && !searchFailures" class="empty-state">
+          <AppIcon name="comments" class="  text-4xl text-gray-300 mb-4" />
+          <p class="text-gray-400">{{ searchQuery ? '没有找到匹配的对话' : '还没有对话，从这里开始' }}</p>
         </div>
       </div>
     </div>
 
+    <div v-if="!isCollapsed" class="sidebar-footer"><el-button text :icon="Setting" @click="$emit('open-settings')">全局设置</el-button><span>让想法自然流动</span></div>
     <!-- 折叠状态下的按钮 -->
     <div v-if="isCollapsed" class="collapsed-actions">
       <el-button 
@@ -141,7 +152,10 @@
 </template>
 
 <script setup>
-import { ref, nextTick, computed } from 'vue'
+import { ref, nextTick, computed, watch, onUnmounted } from 'vue'
+import { AudioLines, Search, X, LoaderCircle } from 'lucide-vue-next'
+import api from '../utils/api'
+import { createSessionSearch } from '../utils/sessionSearch'
 import { ElMessageBox } from 'element-plus'
 import { Plus, Edit, Delete, Setting, MoreFilled } from '@element-plus/icons-vue'
 
@@ -166,7 +180,51 @@ const emit = defineEmits([
   'merge-session-audio'
 ])
 
-const isCollapsed = ref(false)
+const isCollapsed = ref(window.innerWidth < 760)
+const searchQuery = ref('')
+const searchResults = ref([])
+const isSearching = ref(false)
+const searchFailures = ref(0)
+const filteredSessions = computed(() => searchQuery.value.trim() ? searchResults.value : props.sessions)
+const searchSessions = createSessionSearch((id, signal) => api.get(`/sessions/${id}`, { signal }))
+let searchTimer
+let searchController
+let searchVersion = 0
+async function runSearch() {
+  clearTimeout(searchTimer)
+  searchController?.abort()
+  const version = ++searchVersion
+  const query = searchQuery.value.trim()
+  if (!query) { isSearching.value = false; searchResults.value = []; searchFailures.value = 0; return }
+  searchController = new AbortController()
+  isSearching.value = true
+  searchFailures.value = 0
+  const result = await searchSessions(props.sessions, query, searchController.signal)
+  if (version !== searchVersion) return
+  searchResults.value = result.matches
+  searchFailures.value = result.failures
+  isSearching.value = false
+}
+watch([searchQuery, () => props.sessions], () => {
+  clearTimeout(searchTimer)
+  searchController?.abort()
+  searchVersion++
+  searchResults.value = []
+  searchFailures.value = 0
+  isSearching.value = Boolean(searchQuery.value.trim())
+  if (isSearching.value) searchTimer = setTimeout(runSearch, 250)
+}, { deep: true })
+onUnmounted(() => { clearTimeout(searchTimer); searchController?.abort(); searchVersion++ })
+function highlightedSnippet(text) {
+  const query = searchQuery.value.trim()
+  const index = text.toLocaleLowerCase().indexOf(query.toLocaleLowerCase())
+  if (!query || index < 0) return [{ text }]
+  return [{ text: text.slice(0, index) }, { text: text.slice(index, index + query.length), match: true }, { text: text.slice(index + query.length) }]
+}
+function formatShortTime(timestamp) {
+  const date = new Date(timestamp * 1000)
+  return `${date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+}
 const editingSessionId = ref(null)
 const editingTitle = ref('')
 const titleInput = ref(null)
@@ -246,9 +304,7 @@ function formatTime(timestamp) {
   const day = String(date.getDate()).padStart(2, '0')
   const hours = String(date.getHours()).padStart(2, '0')
   const minutes = String(date.getMinutes()).padStart(2, '0')
-  const seconds = String(date.getSeconds()).padStart(2, '0')
-  
-  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
+  return `${year}-${month}-${day} ${hours}:${minutes}`
 }
 </script>
 
@@ -341,6 +397,7 @@ function formatTime(timestamp) {
 }
 
 .session-item {
+  position: relative;
   background: white;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
@@ -348,9 +405,7 @@ function formatTime(timestamp) {
   margin-bottom: 8px;
   cursor: pointer;
   transition: all 0.2s;
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  display: block;
 }
 
 .session-item:hover {
@@ -364,8 +419,8 @@ function formatTime(timestamp) {
 }
 
 .session-content {
-  flex: 1;
   min-width: 0;
+  width: 100%;
 }
 
 .session-info {
@@ -381,24 +436,34 @@ function formatTime(timestamp) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  padding-right: 80px;
 }
 
 .session-meta {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
   font-size: 12px;
   color: #9ca3af;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 .message-count {
-  display: flex;
-  align-items: center;
-  gap: 4px;
+  flex-shrink: 0;
 }
 
 .audio-count {
   white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.time {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
 }
 
 .session-title-edit {
@@ -415,14 +480,34 @@ function formatTime(timestamp) {
 }
 
 .session-actions {
+  position: absolute;
+  top: 7px;
+  right: 7px;
   display: flex;
   gap: 0;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.2s;
 }
 
-.session-item:hover .session-actions {
+.session-item:hover .session-actions,
+.session-item:focus-within .session-actions {
   opacity: 1;
+  pointer-events: auto;
+}
+
+.session-actions :deep(.el-button) {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  margin: 0;
+}
+
+@media (hover: none) {
+  .session-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .empty-state {

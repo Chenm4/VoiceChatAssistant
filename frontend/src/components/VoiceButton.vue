@@ -1,13 +1,17 @@
 <template>
   <button 
     ref="button"
+    :aria-label="isRecording ? '停止录音' : '开始语音输入'"
+    :title="isRecording ? '停止录音' : '开始语音输入（可拖动）'"
     @mousedown="handleMouseDown"
     @touchstart="handleTouchStart"
+    @keydown.enter.prevent="$emit('toggle')"
+    @keydown.space.prevent="$emit('toggle')"
     class="voice-button flex items-center justify-center text-white"
     :class="isRecording ? 'recording' : ''"
   >
     <div class="button-content">
-      <i class="fas text-2xl icon" :class="isRecording ? 'fa-stop' : 'fa-microphone'"></i>
+      <AppIcon :name="isRecording ? 'stop' : 'microphone'" class=" text-2xl icon"  />
       <!-- 录音时显示音频波纹 - 根据音量动态变化 -->
       <div v-if="isRecording" class="audio-rings" :style="{ '--volume': audioVolume }">
         <div class="pulse-ring ring-1"></div>

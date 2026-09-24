@@ -30,7 +30,7 @@ md.renderer.rules.fence = function (tokens, idx) {
   }
   
   return `<div class="code-block-wrapper">
-  <button class="copy-button" onclick="copyCode(event)"><i class="fas fa-copy"></i></button>
+  <button class="copy-button" aria-label="复制代码" title="复制代码" onclick="copyCode(event)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V4H4v12h4"/></svg></button>
   <pre class="hljs"><code>${highlighted}</code></pre>
 </div>`
 }
@@ -57,8 +57,8 @@ window.copyCode = async function(event) {
   try {
     await copyText(text)
     const originalHTML = button.innerHTML
-    button.innerHTML = '<i class="fas fa-check"></i>'
-    button.style.color = '#10b981'
+    button.innerHTML = '✓'
+    button.style.color = '#555555'
     setTimeout(() => {
       button.innerHTML = originalHTML
       button.style.color = ''

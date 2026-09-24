@@ -1,11 +1,19 @@
 <template>
-  <div class="session-settings">
+  <div class="session-settings" :class="{ 'is-resizing': isResizing }" :style="{ width: `${panelWidth}px` }">
+    <div class="settings-resize-handle" role="separator" aria-label="调整会话设置宽度" aria-orientation="vertical" tabindex="0"
+      :aria-valuemin="minimumWidth" :aria-valuemax="maximumWidth" :aria-valuenow="panelWidth"
+      title="拖动调整宽度，双击恢复默认"
+      @pointerdown="startResize" @dblclick="resetWidth"
+      @keydown.left.prevent="setWidth(panelWidth + 20)" @keydown.right.prevent="setWidth(panelWidth - 20)"
+      @keydown.home.prevent="setWidth(minimumWidth)" @keydown.end.prevent="setWidth(maximumWidth)">
+      <span></span>
+    </div>
     <div class="settings-header">
       <div class="title">
         <el-icon><Setting /></el-icon>
         会话设置
       </div>
-      <el-button text @click="$emit('close')" class="btn-close">
+      <el-button text @click="$emit('close')" class="btn-close" aria-label="关闭会话设置">
         <el-icon><Close /></el-icon>
       </el-button>
     </div>
@@ -73,6 +81,36 @@
               </el-tag>
             </template>
           </draggable>
+        </div>
+      </div>
+
+      <div v-if="selectedModels.length" class="section reasoning-section">
+        <div class="label-with-tag">
+          <label class="label">思维链长度</label>
+          <el-tag size="small" type="info">按模型分别设置</el-tag>
+        </div>
+        <div
+          v-for="modelKey in selectedModels"
+          :key="modelKey"
+          class="reasoning-target"
+        >
+          <span class="reasoning-model-name">{{ modelTargetLabel(modelKey) }}</span>
+          <el-select
+            v-model="reasoningEfforts[modelKey]"
+            size="small"
+            style="width: 145px"
+          >
+            <el-option
+              v-for="option in reasoningOptionsForTarget(modelKey)"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
+          </el-select>
+        </div>
+        <div class="model-order-hint">
+          <el-icon><InfoFilled /></el-icon>
+          新选择的模型默认使用该供应商支持的最低档。
         </div>
       </div>
 
@@ -145,7 +183,7 @@
       </div>
 
       <div class="section">
-        <label class="label">历史上下文最大字符数</label>
+        <label class="label">历史上下文最大 Token 数</label>
         <el-input-number
           v-model="contextChars"
           :min="1000"
@@ -155,7 +193,7 @@
           style="width: 100%"
         />
         <div class="prompt-hint">
-          轮数和字符数同时生效，优先去掉更早的历史内容。
+          轮数和 Token 数同时生效，优先去掉更早的历史内容。Token 使用开源分词库计算；非 OpenAI 模型使用通用分词规则。
         </div>
       </div>
 
@@ -354,7 +392,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { Setting, Close, InfoFilled, Select, Rank } from '@element-plus/icons-vue'
 import draggable from 'vuedraggable'
 import api from '../utils/api'
@@ -371,12 +409,68 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['close', 'updated'])
+const emit = defineEmits(['close', 'updated', 'resize'])
+
+const WIDTH_KEY = 'sessionSettingsWidth'
+const viewportWidth = ref(window.innerWidth)
+const maximumWidth = computed(() => Math.min(720, Math.max(0, viewportWidth.value - (viewportWidth.value > 1100 ? 600 : 30))))
+const minimumWidth = computed(() => Math.min(320, maximumWidth.value))
+const panelWidth = ref(370)
+const isResizing = ref(false)
+let activePointer = null
+let resizeTarget = null
+let startX = 0
+let startWidth = 370
+function setWidth(width, persist = true) {
+  panelWidth.value = Math.round(Math.max(minimumWidth.value, Math.min(maximumWidth.value, width)))
+  emit('resize', panelWidth.value)
+  if (persist) {
+    try { localStorage.setItem(WIDTH_KEY, String(panelWidth.value)) } catch { /* Resizing still works without storage. */ }
+  }
+}
+function resetWidth() { setWidth(370) }
+function startResize(event) {
+  if (event.button !== 0) return
+  event.preventDefault()
+  activePointer = event.pointerId
+  resizeTarget = event.currentTarget
+  resizeTarget.setPointerCapture(activePointer)
+  startX = event.clientX
+  startWidth = panelWidth.value
+  isResizing.value = true
+  window.addEventListener('pointermove', moveResize)
+  window.addEventListener('pointerup', finishResize)
+  window.addEventListener('pointercancel', finishResize)
+}
+function moveResize(event) {
+  if (event.pointerId === activePointer) setWidth(startWidth + startX - event.clientX, false)
+}
+function finishResize(event) {
+  if (event && event.pointerId !== activePointer) return
+  if (resizeTarget?.hasPointerCapture(activePointer)) resizeTarget.releasePointerCapture(activePointer)
+  isResizing.value = false
+  activePointer = null
+  resizeTarget = null
+  window.removeEventListener('pointermove', moveResize)
+  window.removeEventListener('pointerup', finishResize)
+  window.removeEventListener('pointercancel', finishResize)
+  if (event) setWidth(panelWidth.value)
+}
+function fitViewport() { viewportWidth.value = window.innerWidth; setWidth(panelWidth.value, false) }
+onMounted(() => {
+  let storedWidth = 370
+  try { storedWidth = Number(localStorage.getItem(WIDTH_KEY)) || 370 } catch { /* Use the default. */ }
+  setWidth(Number.isFinite(storedWidth) ? storedWidth : 370, false)
+  window.addEventListener('resize', fitViewport)
+})
+onUnmounted(() => { finishResize(); window.removeEventListener('resize', fitViewport) })
+
 
 const DEFAULT_SCREENSHOT_PROMPT = '请识别截图中的笔试题。回答时请在开头先简要、直接地给出最终答案，然后再逐题说明简要思路；代码题请给出可运行代码并分析时间复杂度和空间复杂度。'
 
 const selectedSource = ref('')
 const selectedModels = ref([])  // 改为数组支持多选
+const reasoningEfforts = ref({})
 const temperature = ref(0.7)
 const topP = ref(1)
 const contextTurns = ref(15)
@@ -509,7 +603,51 @@ function modelTargetLabel(key) {
   return `${target.source_name} · ${target.model}`
 }
 
-const selectedModelTargets = computed(() => selectedModels.value.map(parseModelTargetKey))
+const OPENAI_REASONING_OPTIONS = [
+  { value: 'none', label: '无（最低）' },
+  { value: 'minimal', label: '极低' },
+  { value: 'low', label: '低' },
+  { value: 'medium', label: '中' },
+  { value: 'high', label: '高' },
+  { value: 'xhigh', label: '极高' }
+]
+
+const QWEN_REASONING_OPTIONS = [
+  { value: 'none', label: '关闭（最低）' },
+  { value: 'low', label: '低' },
+  { value: 'medium', label: '中' },
+  { value: 'xhigh', label: '极高' }
+]
+
+const DEFAULT_REASONING_OPTIONS = [
+  { value: 'none', label: '供应商默认（最低）' }
+]
+
+function reasoningOptionsForTarget(key) {
+  const target = parseModelTargetKey(key)
+  const source = props.config.sources.find(item => item.name === target.source_name)
+  const identity = `${source?.name || ''} ${source?.base_url || ''} ${target.model}`.toLowerCase()
+  if (identity.includes('qwen') || identity.includes('dashscope.aliyuncs.com')) {
+    return QWEN_REASONING_OPTIONS
+  }
+  if (identity.includes('openrouter')) {
+    return OPENAI_REASONING_OPTIONS
+  }
+  const isOpenAIReasoningModel = /^(gpt-[56]|o[134](?:-|$))/i.test(target.model)
+  if (identity.includes('api.openai.com') && isOpenAIReasoningModel) {
+    return OPENAI_REASONING_OPTIONS
+  }
+  return DEFAULT_REASONING_OPTIONS
+}
+
+function defaultReasoningEffort(key) {
+  return reasoningOptionsForTarget(key)[0].value
+}
+
+const selectedModelTargets = computed(() => selectedModels.value.map(key => ({
+  ...parseModelTargetKey(key),
+  reasoning_effort: reasoningEfforts.value[key] || defaultReasoningEffort(key)
+})))
 
 function getFormState() {
   const targets = selectedModelTargets.value
@@ -682,6 +820,18 @@ function initFromSession() {
 
   sharedBackground.value = loadedSharedBackground.value ?? ''
   sharedBackgroundTouched.value = false
+  const savedReasoning = new Map(
+    (sessionConfig?.model_targets || []).map(target => [
+      modelTargetKey(target.source_name, target.model),
+      target.reasoning_effort
+    ])
+  )
+  reasoningEfforts.value = Object.fromEntries(
+    selectedModels.value.map(key => [
+      key,
+      savedReasoning.get(key) || defaultReasoningEffort(key)
+    ])
+  )
   if (selectedModels.value.length > 0 && !selectedModels.value.includes(defaultDisplayModel.value)) {
     defaultDisplayModel.value = selectedModels.value[0]
   }
@@ -695,6 +845,11 @@ watch(() => props.session?.id, (sessionId) => {
 onMounted(loadSharedPromptTemplates)
 
 watch(selectedModels, (models) => {
+  const nextEfforts = { ...reasoningEfforts.value }
+  for (const key of models) {
+    if (!nextEfforts[key]) nextEfforts[key] = defaultReasoningEffort(key)
+  }
+  reasoningEfforts.value = nextEfforts
   if (models.length > 0 && !models.includes(defaultDisplayModel.value)) {
     defaultDisplayModel.value = models[0]
   }
@@ -810,6 +965,9 @@ async function handleSave() {
 function handleReset() {
   selectedSource.value = props.config.current_source
   selectedModels.value = [modelTargetKey(props.config.current_source, props.config.current_model)]
+  reasoningEfforts.value = {
+    [selectedModels.value[0]]: defaultReasoningEffort(selectedModels.value[0])
+  }
   temperature.value = 0.7
   topP.value = 1
   contextTurns.value = 15
@@ -982,6 +1140,29 @@ function handleReset() {
   border: 1px solid #dbeafe;
   border-radius: 10px;
   background: #eff6ff;
+}
+
+.reasoning-section {
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.reasoning-target {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.reasoning-model-name {
+  min-width: 0;
+  color: #475569;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .display-mode-group {

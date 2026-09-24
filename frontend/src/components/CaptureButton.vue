@@ -9,6 +9,8 @@
     aria-label="截图答题"
     @pointerdown="handlePointerDown"
     @contextmenu.prevent="resetPosition"
+    @keydown.enter.prevent="$emit('capture')"
+    @keydown.space.prevent="$emit('capture')"
   >
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M4 7.5h3l1.4-2h7.2l1.4 2h3v11H4z" />
@@ -44,6 +46,7 @@ let currentLeft = 0
 let currentTop = 0
 let customPosition = false
 let animationFrameId = null
+let layoutObserver = null
 
 function clampPosition(left, top) {
   const width = button.value?.offsetWidth || 38
@@ -162,11 +165,21 @@ function handleResize() {
 }
 
 onMounted(() => {
-  nextTick(loadPosition)
+  nextTick(() => {
+    loadPosition()
+    layoutObserver = new ResizeObserver(() => {
+      if (!customPosition && !dragging) positionAtDefaultAnchor()
+    })
+    for (const selector of ['.chat-view', '.input-container', '.input-area']) {
+      const element = document.querySelector(selector)
+      if (element) layoutObserver.observe(element)
+    }
+  })
   window.addEventListener('resize', handleResize)
 })
 
 onUnmounted(() => {
+  layoutObserver?.disconnect()
   window.removeEventListener('resize', handleResize)
   window.removeEventListener('pointermove', handlePointerMove)
   window.removeEventListener('pointerup', handlePointerUp)

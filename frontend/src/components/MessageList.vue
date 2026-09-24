@@ -13,7 +13,7 @@
           @click="toggleSelectionMode" 
           class="btn-toolbar"
         >
-          <i class="fas fa-times"></i>
+          <AppIcon name="times" class=" " />
           取消选择
         </button>
       </div>
@@ -23,7 +23,7 @@
           @click="selectAll" 
           class="btn-toolbar btn-select-all"
         >
-          <i class="fas fa-check-double"></i>
+          <AppIcon name="check-double" class=" " />
           {{ selectedIndices.size === messages.length ? '取消全选' : '全选' }}
         </button>
         
@@ -32,7 +32,7 @@
           class="btn-toolbar btn-delete-selected"
           :disabled="selectedIndices.size === 0"
         >
-          <i class="fas fa-trash"></i>
+          <AppIcon name="trash" class=" " />
           确认删除 ({{ selectedIndices.size }})
         </button>
       </div>
@@ -40,15 +40,12 @@
 
     <div ref="container" class="chat-container" :class="{ 'selection-mode': isSelectionMode }">
       <!-- 欢迎消息 -->
-      <div v-if="messages.length === 0" class="text-center py-12">
-        <i class="fas fa-comments text-6xl text-gray-300 mb-4"></i>
-        <h2 class="text-2xl font-semibold text-gray-700 mb-2">开始新对话</h2>
-        <p class="text-gray-500">在上方输入消息，或点击右下角的麦克风按钮开始语音输入</p>
-        <div class="mt-6 text-sm text-gray-400">
-          <p>✨ 支持 Markdown 格式渲染</p>
-          <p>🎨 代码高亮显示</p>
-          <p>🎤 语音输入识别</p>
-        </div>
+      <div v-if="messages.length === 0" class="welcome-state">
+        <div class="welcome-symbol"><AudioLines :size="32" :stroke-width="1.4" /></div>
+        <span class="eyebrow">留一点空间，给新的想法</span>
+        <h2>从一句话开始。</h2>
+        <p>写下问题，或用声音记录此刻的灵感。<br />剩下的，我们一起梳理。</p>
+        <div class="welcome-features"><span><MessageSquare :size="16" />文字对话</span><span><Mic :size="16" />语音输入</span><span><ScanLine :size="16" />截图提问</span></div>
       </div>
 
       <!-- 消息列表 -->
@@ -69,8 +66,24 @@
                 <!-- 编辑模式 -->
                 <div v-if="editingIndex === index" class="bubble-content editing">
                   <div v-if="willRegenerateAfterEdit" class="regenerate-hint">
-                    <i class="fas fa-info-circle"></i>
+                    <AppIcon name="info-circle" class=" " />
                     保存后将删除后续消息并重新生成响应
+                  </div>
+                  <div v-if="msg.attachments?.length" class="message-attachments">
+                    <button
+                      v-for="attachment in msg.attachments"
+                      :key="attachment.id"
+                      type="button"
+                      class="message-attachment-link"
+                      aria-label="放大查看截图"
+                      @click="openImagePreview(attachment, $event)"
+                    >
+                      <img
+                        :src="attachmentUrl(attachment)"
+                        alt="笔试题截图"
+                        class="message-attachment-image"
+                      />
+                    </button>
                   </div>
                   <textarea
                     ref="editTextarea"
@@ -81,49 +94,48 @@
                   ></textarea>
                   <div class="edit-actions">
                     <button @click="saveEdit(index)" class="btn-save">
-                      <i class="fas fa-check"></i>
+                      <AppIcon name="check" class=" " />
                       {{ willRegenerateAfterEdit ? '保存并重新生成' : '保存' }}
                     </button>
                     <button @click="cancelEdit" class="btn-cancel">
-                      <i class="fas fa-times"></i>
+                      <AppIcon name="times" class=" " />
                     </button>
                   </div>
                 </div>
                 <!-- 正常显示 -->
                 <div v-else class="bubble-content">
                   <div v-if="msg.attachments?.length" class="message-attachments">
-                    <a
+                    <button
                       v-for="attachment in msg.attachments"
                       :key="attachment.id"
-                      :href="attachmentUrl(attachment)"
-                      target="_blank"
-                      rel="noopener noreferrer"
+                      type="button"
                       class="message-attachment-link"
-                      title="打开截图"
+                      aria-label="放大查看截图"
+                      @click="openImagePreview(attachment, $event)"
                     >
                       <img
                         :src="attachmentUrl(attachment)"
                         alt="笔试题截图"
                         class="message-attachment-image"
                       />
-                    </a>
+                    </button>
                   </div>
                   <div class="message-text whitespace-pre-wrap">{{ msg.content }}</div>
                 </div>
                 
                 <!-- 悬浮操作按钮 - 右下角 -->
                 <div v-if="editingIndex !== index && !isSelectionMode" class="message-actions-outer">
-                  <button @click="copyMessage(msg.content, $event)" class="btn-action" title="复制">
-                    <i class="fas fa-copy"></i>
+                  <button @click="copyMessage(msg, $event)" class="btn-action" title="复制">
+                    <AppIcon name="copy" class=" " />
                   </button>
                   <button @click="startEdit(index, msg.content)" class="btn-action" title="编辑">
-                    <i class="fas fa-edit"></i>
+                    <AppIcon name="edit" class=" " />
                   </button>
                   <button @click="handleDirectRegenerate(msg)" class="btn-action" title="重新生成">
-                    <i class="fas fa-sync-alt"></i>
+                    <AppIcon name="sync-alt" class=" " />
                   </button>
                   <button @click="enterDeleteMode(index)" class="btn-action btn-delete" title="删除">
-                    <i class="fas fa-trash"></i>
+                    <AppIcon name="trash" class=" " />
                   </button>
                 </div>
               </div>
@@ -175,7 +187,7 @@
                   class="model-selector-btn exit-fullscreen-btn"
                   title="返回并排显示"
                 >
-                  <i class="fas fa-columns"></i>
+                  <AppIcon name="columns" class=" " />
                   显示全部
                 </button>
               </div>
@@ -192,7 +204,7 @@
                   class="model-nav-btn model-nav-left"
                   title="切换到上一个模型"
                 >
-                  <i class="fas fa-chevron-left"></i>
+                  <AppIcon name="chevron-left" class=" " />
                 </button>
                 <div class="model-cards-container" :class="{ 'fullscreen-mode': getFocusedModelIndex(index, msg) !== undefined }">
                   <div 
@@ -217,8 +229,8 @@
                     
                     <!-- 操作按钮 -->
                     <div v-if="!isSelectionMode" class="message-actions-outer">
-                      <button @click="copyMessage(modelMsg.content, $event)" class="btn-action" title="复制">
-                        <i class="fas fa-copy"></i>
+                      <button @click="copyMessage(modelMsg, $event)" class="btn-action" title="复制">
+                        <AppIcon name="copy" class=" " />
                       </button>
                       <button 
                         v-if="getFocusedModelIndex(index, msg) === undefined"
@@ -226,7 +238,7 @@
                         class="btn-action" 
                         title="聚焦显示"
                       >
-                        <i class="fas fa-expand"></i>
+                        <AppIcon name="expand" class=" " />
                       </button>
                     </div>
                     <div
@@ -242,7 +254,7 @@
                   class="model-nav-btn model-nav-right"
                   title="切换到下一个模型"
                 >
-                  <i class="fas fa-chevron-right"></i>
+                  <AppIcon name="chevron-right" class=" " />
                 </button>
               </div>
             </div>
@@ -273,7 +285,7 @@
                 <!-- 编辑模式 -->
                 <div v-if="editingIndex === index" class="bubble-content editing">
                   <div v-if="willRegenerateAfterEdit" class="regenerate-hint">
-                    <i class="fas fa-info-circle"></i>
+                    <AppIcon name="info-circle" class=" " />
                     保存后将删除后续消息并重新生成响应
                   </div>
                   <textarea
@@ -285,11 +297,11 @@
                   ></textarea>
                   <div class="edit-actions">
                     <button @click="saveEdit(index)" class="btn-save">
-                      <i class="fas fa-check"></i>
+                      <AppIcon name="check" class=" " />
                       {{ willRegenerateAfterEdit ? '保存并重新生成' : '保存' }}
                     </button>
                     <button @click="cancelEdit" class="btn-cancel">
-                      <i class="fas fa-times"></i>
+                      <AppIcon name="times" class=" " />
                     </button>
                   </div>
                 </div>
@@ -307,17 +319,17 @@
 
                 <!-- 悬浮操作按钮 - 右下角 -->
                 <div v-if="editingIndex !== index && !isSelectionMode" class="message-actions-outer">
-                  <button @click="copyMessage(msg.content, $event)" class="btn-action" title="复制">
-                    <i class="fas fa-copy"></i>
+                  <button @click="copyMessage(msg, $event)" class="btn-action" title="复制">
+                    <AppIcon name="copy" class=" " />
                   </button>
                   <button @click="startEdit(index, msg.content)" class="btn-action" title="编辑">
-                    <i class="fas fa-edit"></i>
+                    <AppIcon name="edit" class=" " />
                   </button>
                   <button @click="handleRegenerateAIMessage(index, msg)" class="btn-action" title="重新生成此响应">
-                    <i class="fas fa-sync-alt"></i>
+                    <AppIcon name="sync-alt" class=" " />
                   </button>
                   <button @click="enterDeleteMode(index)" class="btn-action btn-delete" title="删除">
-                    <i class="fas fa-trash"></i>
+                    <AppIcon name="trash" class=" " />
                   </button>
                 </div>
               </div>
@@ -327,13 +339,28 @@
       </div>
     </div>
   </div>
+  <Teleport to="body">
+    <div
+      v-if="previewImageUrl"
+      ref="imagePreviewOverlay"
+      class="image-preview-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="截图预览，点击图片外侧或按 Esc 关闭"
+      tabindex="-1"
+      @click.self="closeImagePreview"
+    >
+      <img :src="previewImageUrl" alt="放大的截图" class="image-preview-full" />
+    </div>
+  </Teleport>
 </template>
 
 <script setup>
+import { AudioLines, MessageSquare, Mic, ScanLine } from 'lucide-vue-next'
 import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { renderMarkdown } from '../utils/markdown'
-import { copyText } from '../utils/clipboard'
+import { blobToDataUrl, copyRichContent } from '../utils/clipboard'
 
 const props = defineProps({
   messages: {
@@ -364,6 +391,30 @@ function attachmentUrl(attachment) {
   if (!props.currentSessionId || !attachment?.id) return ''
   return `/api/attachments/${encodeURIComponent(props.currentSessionId)}/${encodeURIComponent(attachment.id)}`
 }
+
+const previewImageUrl = ref('')
+const imagePreviewOverlay = ref(null)
+let imagePreviewTrigger = null
+
+function openImagePreview(attachment, event) {
+  const url = attachmentUrl(attachment)
+  if (!url) return
+  imagePreviewTrigger = event.currentTarget
+  previewImageUrl.value = url
+  nextTick(() => imagePreviewOverlay.value?.focus())
+}
+
+function closeImagePreview() {
+  previewImageUrl.value = ''
+  const trigger = imagePreviewTrigger
+  imagePreviewTrigger = null
+  nextTick(() => trigger?.isConnected && trigger.focus())
+}
+
+watch(() => props.currentSessionId, () => {
+  previewImageUrl.value = ''
+  imagePreviewTrigger = null
+})
 
 // 根据 provider 返回不同的标签类型
 function getModelTagType(provider) {
@@ -551,7 +602,7 @@ const willRegenerateAfterEdit = ref(false)
 
 // 保存编辑
 async function saveEdit(index) {
-  if (!editingContent.value.trim()) {
+  if (!editingContent.value.trim() && !props.messages[index]?.attachments?.length) {
     ElMessage.warning('消息内容不能为空')
     return
   }
@@ -604,17 +655,58 @@ function cancelEdit() {
   willRegenerateAfterEdit.value = false
 }
 
-// 复制消息
-async function copyMessage(content, event) {
+function clipboardMarkdownHtml(content) {
+  const container = document.createElement('div')
+  container.innerHTML = renderMarkdown(content || '')
+  container.querySelectorAll('.copy-button').forEach(button => button.remove())
+  return container.innerHTML
+}
+
+async function buildAttachmentCopyData(attachments = []) {
+  const results = []
+  for (const [index, attachment] of attachments.entries()) {
+    const relativeUrl = attachmentUrl(attachment)
+    if (!relativeUrl) continue
+    const absoluteUrl = new URL(relativeUrl, window.location.origin).href
+    let imageUrl = absoluteUrl
+    try {
+      const response = await fetch(relativeUrl)
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      imageUrl = await blobToDataUrl(await response.blob())
+    } catch (error) {
+      console.warn('内嵌复制图片失败，保留图片链接:', error)
+    }
+    results.push({
+      label: `截图 ${index + 1}`,
+      absoluteUrl,
+      imageUrl
+    })
+  }
+  return results
+}
+
+// 复制消息（用户截图会以内嵌富文本图片写入剪贴板）
+async function copyMessage(message, event) {
+  const button = event?.currentTarget
   try {
-    await copyText(content)
+    const content = typeof message === 'string' ? message : (message?.content || '')
+    const attachments = typeof message === 'object' ? (message?.attachments || []) : []
+    const copiedImages = attachments.length ? await buildAttachmentCopyData(attachments) : []
+    const imageText = copiedImages.map(image => `![${image.label}](${image.absoluteUrl})`).join('\n')
+    const text = [content, imageText].filter(Boolean).join('\n\n')
+    const imagesHtml = copiedImages.map(image => (
+      `<p><img src="${image.imageUrl}" alt="${image.label}" style="max-width:100%;height:auto;" /></p>`
+    )).join('')
+    const html = `<div>${clipboardMarkdownHtml(content)}${imagesHtml}</div>`
+    await copyRichContent(text, html)
     // 可以添加一个简单的提示
-    const btn = event.currentTarget
-    const originalHTML = btn.innerHTML
-    btn.innerHTML = '<i class="fas fa-check"></i>'
-    setTimeout(() => {
-      btn.innerHTML = originalHTML
-    }, 1000)
+    if (button?.isConnected) {
+      const originalHTML = button.innerHTML
+      button.innerHTML = '<AppIcon name="check" class=" " />'
+      setTimeout(() => {
+        if (button.isConnected) button.innerHTML = originalHTML
+      }, 1000)
+    }
   } catch (error) {
     console.error('复制失败:', error)
     ElMessage.error('复制失败，请重试')
@@ -852,6 +944,13 @@ function findKeyboardTargetMessageIndex() {
 }
 
 function handleModelKeyboardNavigation(event) {
+  if (previewImageUrl.value) {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      closeImagePreview()
+    }
+    return
+  }
   if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
   if (isEditableTarget(event.target)) return
   
@@ -902,6 +1001,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  previewImageUrl.value = ''
   window.removeEventListener('multi-model-preferences-updated', handlePreferencesUpdated)
   window.removeEventListener('mousemove', handleCardResize)
   window.removeEventListener('mouseup', stopCardResize)
@@ -1123,10 +1223,13 @@ defineExpose({
 
 .message-attachment-link {
   display: block;
+  width: 100%;
+  padding: 0;
   overflow: hidden;
   border: 1px solid rgba(59, 130, 246, .2);
   border-radius: 10px;
   background: white;
+  cursor: zoom-in;
 }
 
 .message-attachment-image {
@@ -1135,6 +1238,26 @@ defineExpose({
   max-height: 360px;
   object-fit: contain;
   background: #f8fafc;
+}
+
+.image-preview-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  background: rgba(10, 15, 25, .88);
+  cursor: zoom-out;
+}
+
+.image-preview-full {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  cursor: default;
 }
 
 .assistant-bubble .bubble-content {
