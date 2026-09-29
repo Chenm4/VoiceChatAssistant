@@ -27,17 +27,35 @@
       <InputArea
         v-model="inputMessage"
         :is-sending="isSending"
+        :is-recording="isRecording"
         :capture-connected="captureConnected"
         :capture-source-name="captureSourceName"
-        @send="handleSendMessage"
+        :capture-mode="captureMode"
+        :pending-capture-count="pendingCaptureCount"
+        :pending-captures="pendingCapturePreviews"
+        :capture-responses-active="activeCaptureCount > 0"
+        :active-capture-count="activeCaptureCount"
+        @send="handleComposerSend"
         @reset-capture="handleResetCapture"
-      />
+        @toggle-capture-mode="toggleCaptureMode"
+        @clear-captures="clearPendingCaptures"
+        @remove-capture="removePendingCapture"
+      >
+        <template #scenes>
+          <SceneBar :session="currentSession" :disabled="isCapturing"
+            @selected="handleSceneSelected" />
+        </template>
+        <template #microphone>
+          <MicrophoneSelect :disabled="isRecording || isProcessingRecording" @change="selectedMicrophone = $event" />
+        </template>
+      </InputArea>
 
       <CaptureButton
         :connected="captureConnected"
         :loading="isCapturing"
-        :disabled="isSending || isCapturing"
+        :disabled="isCapturing"
         @capture="handleCaptureAndSend"
+        @cancel="cancelCapture"
       />
 
       <!-- 主聊天区域 -->
@@ -46,6 +64,8 @@
           :messages="messages"
           :is-typing="isTyping"
           :current-session-id="currentSessionId"
+          :session-config="currentSession?.session_config"
+          :sources="config.sources"
           :font-size="messageDisplaySettings.fontSize"
           :line-height="messageDisplaySettings.lineHeight"
           ref="messageListRef"
@@ -53,6 +73,7 @@
           @message-deleted="handleMessageDeleted"
           @messages-deleted="handleMessageDeleted"
           @regenerate="handleRegenerateMessage"
+          @capture-edit-image="handleCaptureForEdit"
         />
       </div>
       
@@ -90,6 +111,8 @@ import { ElMessageBox, ElMessage } from 'element-plus'
 import NavBar from '../components/NavBar.vue'
 import MessageList from '../components/MessageList.vue'
 import InputArea from '../components/InputArea.vue'
+import MicrophoneSelect from '../components/MicrophoneSelect.vue'
+import SceneBar from '../components/SceneBar.vue'
 import CaptureButton from '../components/CaptureButton.vue'
 import VoiceButton from '../components/VoiceButton.vue'
 import SettingsModal from '../components/SettingsModal.vue'
@@ -101,6 +124,61 @@ import { renderMarkdown } from '../utils/markdown'
 import { DisplayScreenCapture } from '../utils/screenCapture'
 
 defineEmits(['open-prompt-lab'])
+
+const sceneSwitching = ref(false)
+const captureControllers = new Set()
+let pendingSceneChange = null
+let sceneChangeVersion = 0
+function streamController() {
+  const controller = new AbortController()
+  controller.finished = new Promise(resolve => { controller.finish = resolve })
+  return controller
+}
+async function handleSceneSelected(change) {
+  const version = ++sceneChangeVersion
+  pendingSceneChange?.onSettled?.()
+  pendingSceneChange = { ...change, version }
+  const running = abortController.value
+  if (running) running.abort('scene-switch')
+  for (const controller of captureControllers) controller.abort('scene-switch')
+  if (sceneSwitching.value) return
+  sceneSwitching.value = true
+  try {
+    while (pendingSceneChange) {
+      await Promise.all([...captureControllers].map(controller => controller.finished))
+      const active = abortController.value
+      if (active) { active.abort('scene-switch'); await active.finished }
+      const request = pendingSceneChange
+      pendingSceneChange = null
+      try {
+        const latest = await api.get(`/sessions/${request.sessionId}`)
+        if (request.version !== sceneChangeVersion) continue
+        const config = { ...latest.session_config, active_scene: request.scene }
+        if (request.commonRules !== undefined && request.commonRules !== config.system_prompt) {
+          config.system_prompt = request.commonRules
+          config.prompt_template_id = null
+          config.prompt_template_version = null
+          config.user_prompt_template = null
+        }
+        config.scene_common_rules = config.system_prompt || ''
+        await api.put(`/sessions/${request.sessionId}/config`, config)
+        if (request.version !== sceneChangeVersion) continue
+        const session = sessions.value.find(item => item.id === request.sessionId)
+        if (session) session.session_config = config
+        if (currentSessionId.value !== request.sessionId) continue
+        await loadSessionMessages(request.sessionId)
+        if (request.version !== sceneChangeVersion) continue
+        const question = [...messages.value].reverse().find(item => item.role === 'user' && item.id)
+        if (request.rerun && question) {
+          // Start without waiting: another click can immediately abort this stream.
+          void handleRegenerateMessage({ messageId: question.id, newContent: question.content, preserveAnswer: true })
+        }
+      } catch (error) {
+        if (request.version === sceneChangeVersion) showNotification('切换场景失败：' + (error.response?.data?.detail || error.message), 'error')
+      } finally { request.onSettled?.() }
+    }
+  } finally { sceneSwitching.value = false }
+}
 
 const DEFAULT_SCREENSHOT_PROMPT = '请识别截图中的笔试题。回答时请在开头先简要、直接地给出最终答案，然后再逐题说明简要思路；代码题请给出可运行代码并分析时间复杂度和空间复杂度。'
 
@@ -127,6 +205,7 @@ const messages = ref([])
 const inputMessage = ref('')
 const isSending = ref(false)
 const isRecording = ref(false)
+const selectedMicrophone = ref(null)
 const isTyping = ref(false)
 const showSettings = ref(false)
 const showSessionSettings = ref(false)
@@ -137,6 +216,20 @@ const abortController = ref(null) // 用于取消请求
 const captureConnected = ref(false)
 const captureSourceName = ref('')
 const isCapturing = ref(false)
+const captureMode = ref('immediate')
+const pendingCaptures = ref([])
+const captureQueue = ref([])
+const activeCaptureCount = ref(0)
+const pendingCaptureCount = computed(() => pendingCaptures.value.length + captureQueue.value.length)
+const pendingCapturePreviews = computed(() => {
+  const attachments = [...pendingCaptures.value, ...captureQueue.value.map(item => item.attachment)]
+  return attachments.map(item => ({
+    id: item.id,
+    url: `/api/attachments/${encodeURIComponent(currentSessionId.value || '')}/${encodeURIComponent(item.id)}`
+  }))
+})
+let captureVersion = 0
+let drainingCaptures = false
 let displayCapture = null
 
 // 会话管理状态
@@ -215,27 +308,23 @@ async function handleSaveConfig(newConfig) {
 
 // 打断当前回答
 function stopCurrentResponse() {
-  if (abortController.value) {
-    console.log('🛑 用户主动打断回答')
-    abortController.value.abort()
-    abortController.value = null
-  }
-  isSending.value = false
-  isTyping.value = false
+  const controller = abortController.value
+  if (controller) controller.abort()
+  return controller?.finished || Promise.resolve()
 }
 
 // 发送消息
 async function handleSendMessage(options = {}) {
+  if (sceneSwitching.value) return showNotification('正在切换场景，请稍候', 'warning')
   const attachments = Array.isArray(options?.attachments) ? options.attachments : []
   const fallbackMessage = options?.fallbackMessage || ''
+  const messageOverride = options?.messageOverride || ''
   // 如果正在发送
   if (isSending.value) {
     // 如果输入框有新内容，先打断再发送新消息
     if (inputMessage.value.trim()) {
       const newMessage = inputMessage.value.trim()
-      stopCurrentResponse()
-      // 等待状态重置
-      await new Promise(resolve => setTimeout(resolve, 100))
+      await stopCurrentResponse()
       inputMessage.value = newMessage
       // 递归调用发送新消息
       return handleSendMessage()
@@ -246,11 +335,11 @@ async function handleSendMessage(options = {}) {
     }
   }
   
-  if (!inputMessage.value.trim() && attachments.length === 0) return
+  if (!inputMessage.value.trim() && !messageOverride && attachments.length === 0) return
   
-  const message = inputMessage.value.trim() || fallbackMessage
+  const message = messageOverride || inputMessage.value.trim() || fallbackMessage
   if (!message) return
-  inputMessage.value = ''
+  if (!messageOverride) inputMessage.value = ''
   
   // 添加用户消息
   messages.value.push({
@@ -277,10 +366,12 @@ async function handleSendMessage(options = {}) {
   isSending.value = true
   
   // 创建新的 AbortController
-  abortController.value = new AbortController()
+  const sendController = streamController()
+  abortController.value = sendController
   
   // 多模型响应容器（后端会告诉我们有多少个模型）
   let modelMessages = []  // 存储多个模型的消息对象
+  let refreshPromise = null
   
   console.log('🚀 开始发送消息，等待流式响应...')
   const startTime = Date.now()
@@ -298,7 +389,7 @@ async function handleSendMessage(options = {}) {
         session_id: currentSessionId.value,
         attachment_ids: attachments.map(attachment => attachment.id)
       }),
-      signal: abortController.value.signal
+      signal: sendController.signal
     })
     
     if (!response.ok) {
@@ -330,6 +421,7 @@ async function handleSendMessage(options = {}) {
         processLine(line)
       }
     }
+    if (refreshPromise) await refreshPromise
     
     function processLine(line) {
       const trimmedLine = line.trim()
@@ -429,7 +521,7 @@ async function handleSendMessage(options = {}) {
           modelMessages = []  // 清空多模型缓存
           // 重新加载消息以获取完整的带ID的数据
           if (currentSessionId.value) {
-            loadSessionMessages(currentSessionId.value).then(() => {
+            refreshPromise = loadSessionMessages(currentSessionId.value).then(() => {
               return loadSessions()
             }).catch(err => {
               console.error('重新加载消息失败:', err)
@@ -442,9 +534,9 @@ async function handleSendMessage(options = {}) {
     }
   } catch (error) {
     // 如果是用户主动取消
-    if (error.name === 'AbortError') {
+    if (sendController.signal.aborted || error.name === 'AbortError') {
       console.log('✋ 请求已被用户取消')
-      showNotification('已停止生成', 'info')
+      if (sendController.signal.reason !== 'scene-switch') showNotification('已停止生成', 'info')
       
       // 保留已生成的内容，只移除空消息
       if (modelMessages.length > 0) {
@@ -505,8 +597,186 @@ async function handleSendMessage(options = {}) {
   } finally {
     isSending.value = false
     isTyping.value = false
-    abortController.value = null
+    if (refreshPromise) await refreshPromise
+    if (abortController.value === sendController) abortController.value = null
+    sendController.finish()
     modelMessages = []
+    if (captureQueue.value.length && !drainingCaptures) queueMicrotask(drainCaptureQueue)
+  }
+}
+
+function screenshotQuestion(extra = '') {
+  const prompt = currentSession.value?.session_config?.screenshot_prompt?.trim() || DEFAULT_SCREENSHOT_PROMPT
+  return extra ? `${prompt}\n\n用户补充要求：${extra}` : prompt
+}
+
+function toggleCaptureMode() {
+  captureMode.value = captureMode.value === 'immediate' ? 'collect' : 'immediate'
+  showNotification(captureMode.value === 'collect' ? '截图将累积，点击发送后一起提问' : '每张截图单独提问', 'info')
+}
+
+function clearPendingCaptures() {
+  const sessionId = currentSessionId.value
+  for (const item of pendingCaptures.value) releaseUnusedCapture(sessionId, item.id)
+  for (const item of captureQueue.value) releaseUnusedCapture(sessionId, item.attachment.id)
+  pendingCaptures.value = []
+  captureQueue.value = []
+}
+
+function removePendingCapture(id) {
+  if (pendingCaptures.value.some(item => item.id === id) || captureQueue.value.some(item => item.attachment.id === id)) {
+    releaseUnusedCapture(currentSessionId.value, id)
+  }
+  pendingCaptures.value = pendingCaptures.value.filter(item => item.id !== id)
+  captureQueue.value = captureQueue.value.filter(item => item.attachment.id !== id)
+}
+
+function releaseUnusedCapture(sessionId, id) {
+  if (!sessionId || !id) return
+  fetch(`/api/attachments/${encodeURIComponent(sessionId)}/${encodeURIComponent(id)}`, {
+    method: 'DELETE'
+  }).catch(error => console.warn('清理未使用截图失败:', error))
+}
+
+function cancelCapture() {
+  captureVersion++
+  displayCapture?.stop()
+  captureConnected.value = false
+  captureSourceName.value = ''
+  clearPendingCaptures()
+  showNotification('已取消截图并停止共享', 'info')
+}
+
+function handleComposerSend() {
+  if (sceneSwitching.value) return showNotification('正在切换场景，请稍候', 'warning')
+  if (activeCaptureCount.value > 0) {
+    showNotification('截图正在并行回答，完成后可发送文字', 'info')
+    return
+  }
+  if (isSending.value) return handleSendMessage()
+  if (!pendingCaptures.value.length) return handleSendMessage()
+  const attachments = pendingCaptures.value.splice(0)
+  const extra = inputMessage.value.trim()
+  inputMessage.value = ''
+  return handleSendMessage({ attachments, messageOverride: screenshotQuestion(extra) })
+}
+
+async function sendImmediateCapture(item) {
+  const requestId = `capture-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  const userMessage = {
+    role: 'user', content: item.message, attachments: [item.attachment],
+    local_request_id: requestId,
+    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+  const assistantMessage = {
+    role: 'assistant', content: '', is_typing_dots: true,
+    local_request_id: requestId,
+    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+  messages.value.push(userMessage, assistantMessage)
+  const controller = streamController()
+  captureControllers.add(controller)
+  activeCaptureCount.value++
+  let completed = false
+  try {
+    await nextTick()
+    messageListRef.value?.scrollToBottom()
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: item.message,
+        session_id: item.sessionId,
+        attachment_ids: [item.attachment.id]
+      })
+    })
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}))
+      throw new Error(data.detail || `HTTP ${response.status}`)
+    }
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    const processLine = line => {
+      if (!line.startsWith('data: ')) return
+      let data
+      try { data = JSON.parse(line.slice(6)) } catch { return }
+      if (data.type === 'provider_request') {
+        logProviderRequest(data)
+      } else if (data.type === 'multi_model_start') {
+        const index = messages.value.findIndex(message => message.local_request_id === requestId && message.role === 'assistant')
+        if (index < 0) return
+        messages.value[index] = {
+          role: 'assistant', is_multi_model: true, is_typing_dots: true,
+          local_request_id: requestId,
+          models: normalizeStreamTargets(data).map((target, modelIndex) => ({
+            content: '', model_index: modelIndex, model: target.model,
+            model_key: target.key, source_name: target.source_name,
+            model_info: { id: target.key, name: target.model, provider: target.source_name }
+          }))
+        }
+      } else if (data.type === 'content') {
+        const message = messages.value.find(candidate => candidate.local_request_id === requestId && candidate.role === 'assistant')
+        if (!message) return
+        if (data.model_index !== undefined && message.models?.[data.model_index]) {
+          message.models[data.model_index].content += data.data
+        } else if (data.model_index === undefined) {
+          message.content += data.data
+        }
+      } else if (data.type === 'model_error' || data.type === 'error') {
+        showNotification(data.message || '截图回答失败', 'error')
+      } else if (data.type === 'done') {
+        completed = true
+      }
+    }
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+      for (const line of lines) processLine(line.trim())
+    }
+    if (buffer.trim()) processLine(buffer.trim())
+    if (!completed && !controller.signal.aborted) showNotification('截图回答未完成，请检查模型请求', 'warning')
+  } catch (error) {
+    if (!controller.signal.aborted) {
+      console.error('截图发送失败:', error)
+      showNotification(`截图发送失败: ${error.message}`, 'error')
+    }
+  } finally {
+    const message = messages.value.find(candidate => candidate.local_request_id === requestId && candidate.role === 'assistant')
+    if (message) message.is_typing_dots = false
+    if (!completed) releaseUnusedCapture(item.sessionId, item.attachment.id)
+    activeCaptureCount.value--
+    if (controller.signal.reason !== 'scene-switch' && activeCaptureCount.value === 0 && currentSessionId.value && !isSending.value) {
+      try {
+        await loadSessionMessages(currentSessionId.value)
+        await loadSessions()
+      } catch (error) {
+        console.warn('刷新截图回答失败:', error)
+      }
+    }
+    captureControllers.delete(controller)
+    controller.finish()
+  }
+}
+
+async function drainCaptureQueue() {
+  if (drainingCaptures || isSending.value || sceneSwitching.value) return
+  drainingCaptures = true
+  try {
+    while (captureQueue.value.length) {
+      const item = captureQueue.value.shift()
+      if (item.sessionId !== currentSessionId.value) {
+        releaseUnusedCapture(item.sessionId, item.attachment.id)
+        continue
+      }
+      void sendImmediateCapture(item)
+    }
+  } finally {
+    drainingCaptures = false
   }
 }
 
@@ -528,12 +798,12 @@ async function selectCaptureSource() {
   captureSourceName.value = label
 }
 
-async function uploadScreenshot(frame) {
-  if (!currentSessionId.value) {
+async function uploadScreenshot(frame, sessionId = currentSessionId.value) {
+  if (!sessionId) {
     throw new Error('当前没有可用会话')
   }
   const formData = new FormData()
-  formData.append('session_id', currentSessionId.value)
+  formData.append('session_id', sessionId)
   formData.append('width', String(frame.width))
   formData.append('height', String(frame.height))
   formData.append('screenshot', frame.blob, `capture-${Date.now()}.webp`)
@@ -552,37 +822,48 @@ async function uploadScreenshot(frame) {
 }
 
 async function handleCaptureAndSend() {
-  if (isSending.value || isCapturing.value) {
-    showNotification('正在生成回答，请稍候或先停止生成', 'warning')
-    return
-  }
+  if (sceneSwitching.value) return showNotification('正在切换场景，请稍候', 'warning')
+  if (isCapturing.value) return
 
   isCapturing.value = true
+  const version = captureVersion
+  const captureSessionId = currentSessionId.value
   try {
     const capture = ensureDisplayCapture()
     if (!capture.connected) {
       await selectCaptureSource()
     }
+    if (version !== captureVersion) { capture.stop(); return }
     const frame = await capture.capture()
+    if (version !== captureVersion) { capture.stop(); return }
     try {
       await copyImageBlob(frame.clipboardBlob)
     } catch (clipboardError) {
       // Clipboard permission/support must not prevent the screenshot question.
       console.warn('截图已生成，但复制到剪贴板失败:', clipboardError)
-      showNotification('截图已发送，但浏览器未允许写入图片剪贴板', 'warning', 3500)
+      showNotification('截图已生成，但浏览器未允许写入图片剪贴板', 'warning', 3500)
     }
-    const attachment = await uploadScreenshot(frame)
+    const attachment = await uploadScreenshot(frame, captureSessionId)
+    if (version !== captureVersion || captureSessionId !== currentSessionId.value) {
+      releaseUnusedCapture(captureSessionId, attachment.id)
+      capture.stop()
+      return
+    }
     captureConnected.value = true
     captureSourceName.value = capture.label
-    const screenshotPrompt = currentSession.value?.session_config?.screenshot_prompt?.trim()
-      || DEFAULT_SCREENSHOT_PROMPT
-    const extraRequirement = inputMessage.value.trim()
-    inputMessage.value = extraRequirement
-      ? `${screenshotPrompt}\n\n用户补充要求：${extraRequirement}`
-      : screenshotPrompt
-    await handleSendMessage({
-      attachments: [attachment]
-    })
+    if (captureMode.value === 'collect') {
+      pendingCaptures.value.push(attachment)
+      showNotification(`已累积 ${pendingCaptures.value.length} 张截图`, 'success')
+    } else {
+      const extraRequirement = inputMessage.value.trim()
+      inputMessage.value = ''
+      captureQueue.value.push({
+        attachment,
+        message: screenshotQuestion(extraRequirement),
+        sessionId: captureSessionId
+      })
+      void drainCaptureQueue()
+    }
   } catch (error) {
     if (error?.name === 'NotAllowedError') {
       showNotification('未获得窗口或标签页共享权限', 'warning')
@@ -592,6 +873,28 @@ async function handleCaptureAndSend() {
     }
     captureConnected.value = Boolean(displayCapture?.connected)
     if (!captureConnected.value) captureSourceName.value = ''
+  } finally {
+    isCapturing.value = false
+  }
+}
+
+async function handleCaptureForEdit() {
+  if (isCapturing.value) return
+  isCapturing.value = true
+  const version = captureVersion
+  const sessionId = currentSessionId.value
+  try {
+    const capture = ensureDisplayCapture()
+    if (!capture.connected) await selectCaptureSource()
+    if (version !== captureVersion) { capture.stop(); return }
+    const frame = await capture.capture()
+    if (version !== captureVersion) { capture.stop(); return }
+    const attachment = await uploadScreenshot(frame, sessionId)
+    if (version !== captureVersion || !messageListRef.value?.addCapturedEditingImage(attachment, sessionId)) {
+      releaseUnusedCapture(sessionId, attachment.id)
+    }
+  } catch (error) {
+    if (error?.name !== 'NotAllowedError') showNotification(error.message || '拍照添加失败', 'error')
   } finally {
     isCapturing.value = false
   }
@@ -616,7 +919,7 @@ async function handleResetCapture() {
 }
 
 // 语音录音防抖标志
-let isProcessingRecording = false
+const isProcessingRecording = ref(false)
 // 记录开始录音时的会话ID，确保停止时发送到正确的会话
 let recordingSessionId = null
 // 录音状态轮询定时器
@@ -757,7 +1060,10 @@ async function handleStartRecording() {
     console.log(`📡 [发送请求:${new Date(Date.now()).toLocaleTimeString()}.${Date.now() % 1000} ] 向后端发送 /recording/start 请求...`)
     const apiStartTime = Date.now()
     
-    const response = await api.post('/recording/start')
+    const response = await api.post('/recording/start', {
+      input_device_index: selectedMicrophone.value?.index ?? null,
+      input_device_name: selectedMicrophone.value?.name ?? null
+    })
     
     const apiEndTime = Date.now()
     const apiDuration = apiEndTime - apiStartTime
@@ -785,12 +1091,12 @@ async function handleStartRecording() {
 // 语音录音切换（供按钮和快捷键调用）
 async function handleToggleRecording() {
   // 防止重复调用
-  if (isProcessingRecording) {
+  if (isProcessingRecording.value) {
     console.warn('⚠️ [防抖] 正在处理录音请求，忽略重复调用')
     return
   }
   
-  isProcessingRecording = true
+  isProcessingRecording.value = true
   
   try {
     if (isRecording.value) {
@@ -801,7 +1107,7 @@ async function handleToggleRecording() {
       await handleStartRecording()
     }
   } finally {
-    isProcessingRecording = false
+    isProcessingRecording.value = false
   }
 }
 
@@ -881,6 +1187,7 @@ async function handleCreateSession() {
     })
     
     if (data.success) {
+      clearPendingCaptures()
       await loadSessions()
       showNotification('新会话已创建', 'success')
     }
@@ -892,7 +1199,10 @@ async function handleCreateSession() {
 
 // 切换会话
 async function handleSwitchSession(sessionId) {
+  if (sceneSwitching.value) return showNotification('正在切换场景，请稍候', 'warning')
   if (sessionId === currentSessionId.value) return
+  if (pendingCaptureCount.value) showNotification('切换会话，未发送的截图已清空', 'info')
+  clearPendingCaptures()
   
   // 如果正在录音，先停止录音（除非是录音停止后自动切换回原会话）
   if (isRecording.value) {
@@ -1148,9 +1458,11 @@ async function handleMessageUpdated() {
 }
 
 // 重新生成消息（新版本 - 调用新的后端接口）
-async function handleRegenerateMessage({ messageId, newContent }) {
-  if (isSending.value) {
-    showNotification('正在发送中，请稍候', 'warning')
+async function handleRegenerateMessage({ messageId, newContent, attachmentIds, model, reasoningEffort, targeted = false, preserveAnswer = false }) {
+  const regenerationSessionId = currentSessionId.value
+  if (sceneSwitching.value && !preserveAnswer) return showNotification('正在切换场景，请稍候', 'warning')
+  if (isSending.value || activeCaptureCount.value > 0) {
+    showNotification('当前回答完成后再重新生成', 'warning')
     return
   }
   
@@ -1168,7 +1480,7 @@ async function handleRegenerateMessage({ messageId, newContent }) {
   const insertIndex = targetIndex + 1
   
   // 2. 检查下一条消息是否是 assistant 消息，如果是则删除它（这是我们要替换的旧回答）
-  if (insertIndex < messages.value.length && messages.value[insertIndex].role === 'assistant') {
+  if (!targeted && insertIndex < messages.value.length && messages.value[insertIndex].role === 'assistant') {
     messages.value.splice(insertIndex, 1)
     console.log(`📝 临时删除旧回答消息`)
   } else {
@@ -1183,14 +1495,17 @@ async function handleRegenerateMessage({ messageId, newContent }) {
     is_temporary: true,
     is_typing_dots: true // 显示打字机动画
   }
-  messages.value.splice(insertIndex, 0, tempMsg)
-  let temporaryMessageIndex = insertIndex
+  if (!targeted) messages.value.splice(insertIndex, 0, tempMsg)
+  let temporaryMessageIndex = targeted ? -1 : insertIndex
   
   isTyping.value = true
   isSending.value = true
+  const regenerateController = streamController()
+  abortController.value = regenerateController
   
   // 多模型响应容器
   let modelMessages = []
+  let refreshPromise = null
   
   console.log('🚀 开始重新生成，等待流式响应...')
   const startTime = Date.now()
@@ -1203,9 +1518,14 @@ async function handleRegenerateMessage({ messageId, newContent }) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({ 
+        preserve_answer: preserveAnswer,
         message_id: messageId,
-        new_content: newContent
-      })
+        new_content: newContent,
+        ...(attachmentIds !== undefined ? { attachment_ids: attachmentIds } : {}),
+        ...(model ? { model } : {}),
+        ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
+      }),
+      signal: regenerateController.signal
     })
     
     if (!response.ok) {
@@ -1237,8 +1557,10 @@ async function handleRegenerateMessage({ messageId, newContent }) {
         processLine(line)
       }
     }
+    if (refreshPromise) await refreshPromise
     
     function processLine(line) {
+      if (regenerateController.signal.aborted) return
       const trimmedLine = line.trim()
       if (!trimmedLine || !trimmedLine.startsWith('data: ')) return
       
@@ -1331,7 +1653,7 @@ async function handleRegenerateMessage({ messageId, newContent }) {
           // 重新加载消息以获取完整的、位置正确的数据
           console.log('✅ 重新生成完成，正在刷新消息列表...')
           if (currentSessionId.value) {
-            loadSessionMessages(currentSessionId.value).then(() => {
+            refreshPromise = loadSessionMessages(currentSessionId.value).then(() => {
               console.log('✅ 消息列表已刷新，显示在正确位置')
             }).catch(err => {
               console.error('重新加载消息失败:', err)
@@ -1346,18 +1668,24 @@ async function handleRegenerateMessage({ messageId, newContent }) {
     // 不显示成功通知，因为消息刷新会有视觉反馈
     
   } catch (error) {
-    console.error('重新生成失败:', error)
-    showNotification('重新生成失败: ' + error.message, 'error')
-    // 刷新消息列表以恢复正确状态
-    if (currentSessionId.value) {
-      loadSessionMessages(currentSessionId.value).catch(err => {
-        console.error('恢复消息列表失败:', err)
-      })
+    if (!regenerateController.signal.aborted && error.name !== 'AbortError') {
+      console.error('重新生成失败:', error)
+      showNotification('重新生成失败: ' + error.message, 'error')
     }
   } finally {
-    isSending.value = false
-    isTyping.value = false
-    modelMessages = []
+    try {
+      if (refreshPromise) await refreshPromise
+      if (currentSessionId.value === regenerationSessionId && regenerateController.signal.reason !== 'scene-switch') {
+        await loadSessionMessages(regenerationSessionId)
+      }
+    } finally {
+      if (abortController.value === regenerateController) abortController.value = null
+      isSending.value = false
+      isTyping.value = false
+      regenerateController.finish()
+      modelMessages = []
+      if (!sceneSwitching.value && captureQueue.value.length && !drainingCaptures) queueMicrotask(drainCaptureQueue)
+    }
   }
 }
 
@@ -1400,15 +1728,15 @@ function handleKeyDown(event) {
   if (event.key === 'Escape' && isRecording.value) {
     event.preventDefault()
     event.stopPropagation()
-    if (event.repeat || isProcessingRecording) return
+    if (event.repeat || isProcessingRecording.value) return
 
-    isProcessingRecording = true
+    isProcessingRecording.value = true
     handleStopRecording({ sendMessage: false })
       .catch(error => {
         console.error('Esc 停止识别失败:', error)
       })
       .finally(() => {
-        isProcessingRecording = false
+        isProcessingRecording.value = false
       })
     return
   }
@@ -1557,8 +1885,8 @@ onUnmounted(() => {
 
 .chat-main {
   flex: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
+  min-height: 0;
+  overflow: hidden;
   width: 100%;
   min-width: 0;
   background: #f7f9fc;

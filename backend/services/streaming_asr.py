@@ -11,6 +11,7 @@
 """
 
 import asyncio
+import audioop
 import sys
 import threading
 import time
@@ -106,15 +107,14 @@ class StreamingASR:
         self.frames_per_segment: int = int(self.RATE * self.segment_duration / 1000)
         self.bytes_per_segment: int = self.frames_per_segment * self.CHANNELS * 2
         
-        # 预热 PyAudio（只创建实例，不打开设备）
-        if preload:
-            try:
-                self.p = pyaudio.PyAudio()
-                self.logger.info("🔥 [预热] PyAudio 实例已创建（未打开麦克风）")
-            except Exception as e:
-                self.logger.warning(f"⚠️ [预热失败] PyAudio 预热失败: {e}")
-                self.p = None
-        
+        # Do not keep a PortAudio device snapshot between recordings. The default
+        # input may change while a preloaded ASR instance is waiting in the pool.
+        self.input_device_name = ""
+        self.input_device_index = None
+        self.requested_device_name = None
+        self.raw_peak = 0
+        self.processed_peak = 0
+
         if preload:
             self.logger.info(
                 f"🔥 [预热完成] ASR实例预热: {self.CHANNELS}声道, "
@@ -259,17 +259,31 @@ class StreamingASR:
         """启动音频捕获线程（打开麦克风）"""
         try:
             noise_suppressor = create_noise_suppressor(self.RATE, self.CHANNELS, self.logger)
-            # 如果没有预热的PyAudio实例，现在创建
-            if not self.p:
-                self.p = pyaudio.PyAudio()
-                self.logger.info("🎤 [音频设备] 创建 PyAudio 实例")
-            
+            if self.p:
+                self.p.terminate()
+            self.p = pyaudio.PyAudio()
+            if self.input_device_index is None:
+                device = self.p.get_default_input_device_info()
+            else:
+                try:
+                    device = self.p.get_device_info_by_index(self.input_device_index)
+                except (OSError, ValueError) as exc:
+                    raise ValueError('所选麦克风已不可用，请刷新列表并重新选择') from exc
+                if device['maxInputChannels'] <= 0 or (
+                    self.requested_device_name and device['name'] != self.requested_device_name
+                ):
+                    raise ValueError('所选麦克风已变更，请刷新列表并重新选择')
+            self.input_device_name = device['name']
+            self.raw_peak = self.processed_peak = 0
+            self.logger.info("🎤 当前输入设备: %s (index=%s)", self.input_device_name, device['index'])
+
             # 打开音频流（真正打开麦克风）
             self.stream = self.p.open(
                 format=self.FORMAT,
                 channels=self.CHANNELS,
                 rate=self.RATE,
                 input=True,
+                input_device_index=int(device['index']),
                 frames_per_buffer=self.CHUNK
             )
             self.logger.info("🎤 [音频设备] 麦克风已打开")
@@ -295,12 +309,14 @@ class StreamingASR:
                         
                         # 读取音频数据
                         data = self.stream.read(self.CHUNK, exception_on_overflow=False)
+                        self.raw_peak = max(self.raw_peak, audioop.max(data, 2))
                         if noise_suppressor is not None:
                             try:
                                 data = noise_suppressor.process(data)
                             except Exception as exc:
                                 self.logger.warning("麦克风降噪失败，后续使用原始音频: %s", exc)
                                 noise_suppressor = None
+                        self.processed_peak = max(self.processed_peak, audioop.max(data, 2))
                         buffer += data
                         chunk_count += 1
                         
@@ -582,6 +598,14 @@ class StreamingASR:
             self.logger.info(f"🏁 [停止完成] 总耗时: {total_stop_elapsed:.2f}ms")
             self.logger.info("=" * 80)
             
+            self.logger.info("录音音量诊断: device=%s, raw_peak=%s, processed_peak=%s",
+                             self.input_device_name, self.raw_peak, self.processed_peak)
+            # Distinguish silent capture from an ASR/network failure.
+            if self.audio_buffer and self.raw_peak == 0:
+                return None, (f"麦克风「{self.input_device_name}」采集到的声音全为静音。"
+                              "请检查系统声音输入设备、输入音量，以及启动后端的应用的麦克风权限；"
+                              "若 MacBook 合盖，请开盖或使用外接麦克风。")
+
             # 返回结果
             if self.result_text:
                 # 如果是自动停止，在结果中添加提示

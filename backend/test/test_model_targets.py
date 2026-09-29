@@ -89,6 +89,26 @@ class ModelTargetTests(unittest.TestCase):
             {"extra_body": {"reasoning": {"effort": "low"}}},
         )
 
+    def test_openrouter_default_does_not_disable_mandatory_reasoning(self):
+        source = ConfigSource(name="Router", api_key="key",
+                              base_url="https://openrouter.ai/api/v1", models=[])
+        for model in ["openai/gpt-6-astra", "anthropic/claude-sonnet-4.5", "qwen/qwen3"]:
+            with self.subTest(model=model):
+                expected = {"extra_body": {"reasoning": {"effort": "minimal"}}}
+                self.assertEqual(routes.get_chat_completion_extra_params(source, model), expected)
+                self.assertEqual(routes.get_chat_completion_extra_params(source, model, "none"), expected)
+                self.assertEqual(routes.get_chat_completion_extra_params(source, model, "minimal"), expected)
+                self.assertEqual(routes.get_chat_completion_extra_params(source, model, "high"),
+                                 {"extra_body": {"reasoning": {"effort": "high"}}})
+
+    def test_legacy_openrouter_target_reports_effective_minimal(self):
+        source = ConfigSource(name="OpenRouter", api_key="key",
+                              base_url="https://openrouter.ai/api/v1", models=["openai/gpt-6-astra"])
+        config = SessionConfig(model_targets=[ModelTarget(source_name=source.name, model=source.models[0])])
+        with patch.object(routes, "config_sources", [source]):
+            targets = routes.resolve_model_targets(config)
+        self.assertEqual(targets[0]['reasoning_effort'], 'minimal')
+
     def test_config_source_rejects_non_ascii_api_key(self):
         with self.assertRaises(ValidationError):
             ConfigSource(

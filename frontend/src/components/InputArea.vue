@@ -1,10 +1,25 @@
 <template>
   <div class="input-area">
     <div class="input-wrapper">
-      <div v-if="captureConnected" class="capture-status">
-        <span class="capture-dot"></span>
-        <span class="capture-label" :title="captureSourceName">正在捕获：{{ captureSourceName || '已选择窗口或标签页' }}</span>
-        <button class="capture-reset" type="button" @click="$emit('reset-capture')">更换来源</button>
+      <div class="composer-tools">
+        <slot name="scenes" />
+        <slot name="microphone" />
+        <div class="capture-mode-row">
+          <button type="button" @click="$emit('toggle-capture-mode')" class="capture-mode-toggle" title="点击切换截图发送方式">
+            截图：{{ captureMode === 'collect' ? '累积' : '逐张' }}
+          </button>
+          <span v-if="captureConnected" class="capture-label" :title="captureSourceName">{{ captureSourceName || '已共享' }}</span>
+          <button v-if="captureConnected" type="button" @click="$emit('reset-capture')">更换来源</button>
+          <span v-if="pendingCaptureCount">待发 {{ pendingCaptureCount }}</span>
+          <span v-if="activeCaptureCount">回答中 {{ activeCaptureCount }}</span>
+          <button v-if="pendingCaptureCount" type="button" @click="$emit('clear-captures')">清空</button>
+        </div>
+      </div>
+      <div v-if="pendingCaptures.length" class="pending-captures">
+        <div v-for="item in pendingCaptures" :key="item.id" class="pending-capture">
+          <img :src="item.url" alt="待发送截图" />
+          <button type="button" :aria-label="'移除截图 ' + item.id" @click="$emit('remove-capture', item.id)">×</button>
+        </div>
       </div>
       <div class="input-container" :class="{ focused: isFocused }">
         <div class="textarea-wrapper">
@@ -26,14 +41,14 @@
         <span class="capture-anchor-space" aria-hidden="true"></span>
         <button 
           @click="$emit('send')"
-          :disabled="!isSending && !modelValue.trim()"
+          :disabled="captureResponsesActive || (!isSending && !modelValue.trim() && !pendingCaptureCount)"
           class="send-button"
           :class="{ 
-            active: !isSending && modelValue.trim(),
+            active: !isSending && (modelValue.trim() || pendingCaptureCount),
             stop: isSending
           }"
-          :title="isSending ? '停止生成' : '发送消息'"
-          :aria-label="isSending ? '停止生成' : '发送消息'"
+          :title="captureResponsesActive ? '截图正在并行回答' : (isSending ? '停止生成' : '发送消息')"
+          :aria-label="captureResponsesActive ? '截图正在并行回答' : (isSending ? '停止生成' : '发送消息')"
         >
           <svg v-if="!isSending" class="send-icon" viewBox="0 0 20 20" aria-hidden="true">
             <path d="M10 15.5V4.5M5.75 8.75 10 4.5l4.25 4.25" />
@@ -47,7 +62,7 @@
 </template>
 
 <script setup>
-import { ref, watch, nextTick } from 'vue'
+import { ref, watch, nextTick, onMounted } from 'vue'
 
 const props = defineProps({
   modelValue: {
@@ -58,6 +73,7 @@ const props = defineProps({
     type: Boolean,
     default: false
   },
+  isRecording: { type: Boolean, default: false },
   captureConnected: {
     type: Boolean,
     default: false
@@ -65,10 +81,15 @@ const props = defineProps({
   captureSourceName: {
     type: String,
     default: ''
-  }
+  },
+  captureMode: { type: String, default: 'immediate' },
+  pendingCaptureCount: { type: Number, default: 0 },
+  pendingCaptures: { type: Array, default: () => [] },
+  captureResponsesActive: { type: Boolean, default: false },
+  activeCaptureCount: { type: Number, default: 0 }
 })
 
-const emit = defineEmits(['update:modelValue', 'send', 'reset-capture'])
+const emit = defineEmits(['update:modelValue', 'send', 'reset-capture', 'toggle-capture-mode', 'clear-captures', 'remove-capture'])
 
 const textarea = ref(null)
 const isFocused = ref(false)
@@ -108,28 +129,55 @@ function handleKeyDown(e) {
   }
 }
 
-function adjustHeight() {
+function adjustHeight(followLatest = false) {
   nextTick(() => {
     if (textarea.value) {
+      const previousScrollTop = textarea.value.scrollTop
       textarea.value.style.height = 'auto'
       textarea.value.style.height = Math.min(textarea.value.scrollHeight, 200) + 'px'
+      textarea.value.scrollTop = followLatest ? textarea.value.scrollHeight : previousScrollTop
     }
   })
 }
 
-// 监听值变化，调整高度
+// 语音转写通过 modelValue 更新，不会触发 textarea 的 input 事件。
 watch(() => props.modelValue, () => {
-  if (props.modelValue === '') {
-    nextTick(() => {
-      if (textarea.value) {
-        textarea.value.style.height = 'auto'
-      }
-    })
-  }
+  adjustHeight(props.isRecording || !isFocused.value)
 })
+
+onMounted(() => adjustHeight(true))
 </script>
 
 <style scoped>
+.composer-tools { display:flex; align-items:center; flex-wrap:wrap; gap:6px 12px; margin-bottom:6px; }
+.capture-meta-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  column-gap: 16px;
+  padding: 0 4px 5px;
+  min-height: 25px;
+}
+.capture-mode-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: #64748b;
+  font-size: 12px;
+}
+.capture-mode-row button {
+  border: 0;
+  background: transparent;
+  color: #4f46e5;
+  cursor: pointer;
+  padding: 2px 0;
+}
+.capture-mode-toggle span { color: #94a3b8; margin-left: 3px; }
+.pending-captures { display: flex; gap: 7px; overflow-x: auto; padding: 2px 5px 8px; }
+.pending-capture { position: relative; flex: 0 0 54px; height: 54px; }
+.pending-capture img { width: 100%; height: 100%; object-fit: cover; border-radius: 8px; border: 1px solid #cbd5e1; }
+.pending-capture button { position: absolute; top: -3px; right: -3px; width: 19px; height: 19px; padding: 0; border: 0; border-radius: 50%; color: white; background: #334155; cursor: pointer; }
 .input-area {
   background: #f7f9fc;
   padding: 12px 20px 14px;
@@ -148,8 +196,8 @@ watch(() => props.modelValue, () => {
   display: flex;
   align-items: center;
   gap: 7px;
-  min-height: 24px;
-  padding: 0 10px 6px;
+  min-width: 0;
+  max-width: 60%;
   color: #475569;
   font-size: 12px;
 }
@@ -208,14 +256,15 @@ watch(() => props.modelValue, () => {
   display: block;
   box-sizing: border-box;
   width: 100%;
-  min-height: 42px;
-  padding: 8px 0 7px;
+  min-height: 38px;
+  padding: 6px 0;
   border: 0;
   border-radius: 0;
   font-size: 16px;
   line-height: 1.65;
   resize: none;
   max-height: 200px;
+  overflow-y: auto;
   transition: color .18s ease;
   background: white;
   color: #1f2937;

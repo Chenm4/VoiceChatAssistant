@@ -110,7 +110,7 @@
         </div>
         <div class="model-order-hint">
           <el-icon><InfoFilled /></el-icon>
-          新选择的模型默认使用该供应商支持的最低档。
+          OpenRouter 默认使用 minimal（极低）；其他供应商使用列表首档。
         </div>
       </div>
 
@@ -278,7 +278,7 @@
 
       <div class="section">
         <div class="label-with-tag">
-          <label class="label">系统提示词</label>
+          <label class="label">系统提示词（所有场景共用）</label>
           <el-tag size="small" type="warning">影响AI行为</el-tag>
         </div>
         <el-select 
@@ -288,6 +288,11 @@
           style="width: 100%; margin-bottom: 8px"
         >
           <el-option label="无（使用默认）" value="" />
+          <el-option
+            v-if="promptTemplateId"
+            :label="`${selectedTemplateName} · v${promptTemplateVersion || 1}（会话快照）`"
+            :value="`snapshot:${promptTemplateId}`"
+          />
           <el-option 
             v-for="template in promptTemplates" 
             :key="template.id || template.name"
@@ -306,12 +311,15 @@
         />
         <div class="prompt-hint">
           <el-icon><InfoFilled /></el-icon>
-          实验室模板会在选中时保存一份会话快照。这里直接修改会自动转为自定义，不会改动实验室模板。
+          实验室更新不会自动覆盖会话快照。选择新版或点击「应用最新版」后，保存即可生效；直接编辑会转为自定义。
         </div>
         <div v-if="promptTemplateId" class="template-snapshot">
           <div>
             <el-tag size="small" type="primary">模板快照</el-tag>
             <span>{{ selectedTemplateName }} · v{{ promptTemplateVersion || 1 }}</span>
+            <el-button v-if="hasNewerPromptTemplate" size="small" @click="applyLatestPromptTemplate">
+              应用最新版 v{{ latestPromptTemplate.version }}
+            </el-button>
           </div>
           <div class="user-prompt-preview">
             User Prompt：{{ displayUserPromptTemplate }}
@@ -319,7 +327,16 @@
         </div>
       </div>
 
-      <div class="section">
+      <div v-if="session?.session_config?.active_scene" class="section">
+        <label class="label">当前场景：{{ session.session_config.active_scene.name }}</label>
+        <p class="prompt-hint">以下内容与「管理场景」同步，仅附加到本轮用户消息，不写入历史，不随轮数叠加。默认背景资料在恢复默认后使用。</p>
+        <label class="label">场景用户提示词</label>
+        <el-input v-model="sceneRules" type="textarea" :rows="4" resize="vertical" />
+        <label class="label" style="margin-top:12px">项目资料</label>
+        <el-input v-model="sceneBackground" type="textarea" :rows="6" resize="vertical" />
+        <details style="margin-top:12px"><summary>查看场景用户提示词预览</summary><pre style="white-space:pre-wrap">{{ effectiveScenePrompt }}</pre></details>
+      </div>
+      <div v-else class="section">
         <div class="label-with-tag">
           <label class="label">个人与项目背景资料</label>
           <el-tag size="small" :type="backgroundMode === 'shared' ? 'success' : 'info'">
@@ -481,6 +498,15 @@ const displayFontSize = ref(16)
 const displayLineHeight = ref(1.7)
 const saving = ref(false)
 const systemPrompt = ref('')
+const sceneRules = ref('')
+const sceneBackground = ref('')
+const effectiveScenePrompt = computed(() => [
+  '【当前场景】\n' + (props.session?.session_config?.active_scene?.name || ''),
+  sceneRules.value.trim() ? '【场景要求】\n' + sceneRules.value.trim() : '',
+  sceneBackground.value.trim() ? '【当前项目资料】\n' + sceneBackground.value.trim() : '',
+  '历史仅供理解问题，其他项目的经历不能当作当前项目事实。',
+  '【当前问题】\n（发送时使用本次输入）'
+].filter(Boolean).join('\n\n'))
 const backgroundContext = ref('')
 const backgroundMode = ref('shared')
 const sharedBackground = ref('')
@@ -627,11 +653,14 @@ function reasoningOptionsForTarget(key) {
   const target = parseModelTargetKey(key)
   const source = props.config.sources.find(item => item.name === target.source_name)
   const identity = `${source?.name || ''} ${source?.base_url || ''} ${target.model}`.toLowerCase()
-  if (identity.includes('qwen') || identity.includes('dashscope.aliyuncs.com')) {
-    return QWEN_REASONING_OPTIONS
+  if (identity.includes('api.xiaomimimo.com')) {
+    return [{ value: 'none', label: '关闭思考' }, { value: 'high', label: '开启思考' }]
   }
   if (identity.includes('openrouter')) {
-    return OPENAI_REASONING_OPTIONS
+    return OPENAI_REASONING_OPTIONS.filter(option => option.value !== 'none')
+  }
+  if (identity.includes('qwen') || identity.includes('dashscope.aliyuncs.com')) {
+    return QWEN_REASONING_OPTIONS
   }
   const isOpenAIReasoningModel = /^(gpt-[56]|o[134](?:-|$))/i.test(target.model)
   if (identity.includes('api.openai.com') && isOpenAIReasoningModel) {
@@ -668,6 +697,8 @@ function getFormState() {
     display_font_size: Number(displayFontSize.value),
     display_line_height: Number(displayLineHeight.value),
     system_prompt: systemPrompt.value,
+    scene_rules: sceneRules.value,
+    scene_background: sceneBackground.value,
     prompt_template_id: promptTemplateId.value,
     prompt_template_version: promptTemplateVersion.value,
     user_prompt_template: userPromptTemplate.value,
@@ -779,7 +810,9 @@ function initFromSession() {
     screenshotPrompt.value = sessionConfig.screenshot_prompt || DEFAULT_SCREENSHOT_PROMPT
     displayFontSize.value = sessionConfig.display_font_size ?? 16
     displayLineHeight.value = sessionConfig.display_line_height ?? 1.7
-    systemPrompt.value = sessionConfig.system_prompt || ''
+    systemPrompt.value = sessionConfig.system_prompt ?? props.session.system_prompt ?? ''
+    sceneRules.value = sessionConfig.active_scene?.rules || ''
+    sceneBackground.value = sessionConfig.active_scene?.background || ''
     backgroundContext.value = sessionConfig.background_context || ''
     // 旧会话的 system prompt 往往已经包含背景资料。缺少模式字段时
     // 保持后端的 legacy 语义，不自动再叠加共享背景；新会话由后端明确写入 shared。
@@ -789,7 +822,7 @@ function initFromSession() {
     userPromptTemplate.value = sessionConfig.user_prompt_template || ''
 
     if (promptTemplateId.value) {
-      selectedPromptTemplate.value = `lab:${promptTemplateId.value}`
+      selectedPromptTemplate.value = `snapshot:${promptTemplateId.value}`
     } else if (systemPrompt.value) {
       const matchedTemplate = promptTemplates.value.find(
         template => template.source !== 'lab' && template.content === systemPrompt.value
@@ -829,7 +862,8 @@ function initFromSession() {
   reasoningEfforts.value = Object.fromEntries(
     selectedModels.value.map(key => [
       key,
-      savedReasoning.get(key) || defaultReasoningEffort(key)
+      reasoningOptionsForTarget(key).some(option => option.value === savedReasoning.get(key))
+        ? savedReasoning.get(key) : defaultReasoningEffort(key)
     ])
   )
   if (selectedModels.value.length > 0 && !selectedModels.value.includes(defaultDisplayModel.value)) {
@@ -838,8 +872,8 @@ function initFromSession() {
   setFormBaseline()
 }
 
-watch(() => props.session?.id, (sessionId) => {
-  if (!sessionId || sessionId === initializedSessionId.value) return
+watch([() => props.session?.id, () => props.session?.session_config], ([sessionId]) => {
+  if (!sessionId) return
   initFromSession()
 }, { immediate: true })
 onMounted(loadSharedPromptTemplates)
@@ -869,7 +903,20 @@ function clearPromptTemplateAssociation() {
   userPromptTemplate.value = ''
 }
 
+const latestPromptTemplate = computed(() => promptTemplates.value.find(
+  item => item.source === 'lab' && item.promptId === promptTemplateId.value
+))
+const hasNewerPromptTemplate = computed(() => latestPromptTemplate.value &&
+  latestPromptTemplate.value.version > (promptTemplateVersion.value || 1))
+
+function applyLatestPromptTemplate() {
+  if (!latestPromptTemplate.value) return
+  selectedPromptTemplate.value = latestPromptTemplate.value.id
+  handlePromptTemplateChange()
+}
+
 function handlePromptTemplateChange() {
+  if (selectedPromptTemplate.value.startsWith('snapshot:')) return
   if (selectedPromptTemplate.value === 'custom') {
     clearPromptTemplateAssociation()
     return
@@ -910,7 +957,8 @@ async function handleSave() {
   saving.value = true
   try {
     if (
-      backgroundMode.value === 'shared'
+      !props.session.session_config?.active_scene
+      && backgroundMode.value === 'shared'
       && sharedBackgroundTouched.value
       && sharedBackground.value !== loadedSharedBackground.value
     ) {
@@ -928,6 +976,8 @@ async function handleSave() {
       .filter(target => target.source_name === firstTarget.source_name)
       .map(target => target.model)
     const payload = {
+      active_scene: props.session.session_config?.active_scene ? { ...props.session.session_config.active_scene, rules: sceneRules.value, background: sceneBackground.value } : null,
+      scene_common_rules: systemPrompt.value,
       source_name: firstTarget.source_name,
       models: legacyModels,
       model_targets: targets,

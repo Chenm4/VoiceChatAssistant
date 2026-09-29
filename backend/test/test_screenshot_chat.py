@@ -1,10 +1,13 @@
 import base64
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
-from backend.api.models import MessageAttachment, SessionConfig
+from fastapi import HTTPException
+from backend.api.models import ChatMessage, ChatRequest, MessageAttachment, MessageUpdateRequest, ModelTarget, RegenerateMessageRequest, Session, SessionConfig
 from backend.api import routes
 
 
@@ -58,6 +61,137 @@ class ScreenshotChatTests(unittest.TestCase):
 
         self.assertEqual(preview, "question [images=1]")
         self.assertNotIn("AAAA", preview)
+
+    def test_edit_can_replace_and_remove_screenshots(self):
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            session_id = "session_test"
+            folder = root / session_id
+            folder.mkdir()
+            old_id, new_id = "a" * 24, "b" * 24
+            (folder / f"{old_id}.webp").write_bytes(b"RIFFxxxxWEBPold")
+            (folder / f"{new_id}.webp").write_bytes(b"RIFFxxxxWEBPnew")
+            old = MessageAttachment(id=old_id, mime_type="image/webp", filename=f"{old_id}.webp")
+            message = ChatMessage(id="question", role="user", content="old", attachments=[old])
+            session = Session(id=session_id, title="test", created_at=1, updated_at=1, messages=[message])
+            with patch.object(routes, "SCREENSHOT_DIR", root), \
+                 patch.object(routes.session_storage, "load_session", return_value=session), \
+                 patch.object(routes.session_storage, "save_session"):
+                asyncio.run(routes.update_message(
+                    session_id, message.id,
+                    MessageUpdateRequest(content="new", attachment_ids=[new_id]),
+                ))
+                self.assertEqual([item.id for item in message.attachments], [new_id])
+                self.assertFalse((folder / f"{old_id}.webp").exists())
+                self.assertTrue((folder / f"{new_id}.webp").exists())
+
+    def test_pending_image_cleanup_cannot_delete_saved_message_image(self):
+        with tempfile.TemporaryDirectory() as directory_name:
+            root = Path(directory_name)
+            folder = root / "session_test"
+            folder.mkdir()
+            image_id = "a" * 24
+            path = folder / f"{image_id}.webp"
+            path.write_bytes(b"RIFFxxxxWEBPimage")
+            attachment = MessageAttachment(id=image_id, mime_type="image/webp", filename=path.name)
+            session = Session(
+                id="session_test", title="test", created_at=1, updated_at=1,
+                messages=[ChatMessage(id="question", role="user", content="image", attachments=[attachment])],
+            )
+            with patch.object(routes, "SCREENSHOT_DIR", root), \
+                 patch.object(routes.session_storage, "load_session", return_value=session):
+                with self.assertRaises(HTTPException) as result:
+                    asyncio.run(routes.delete_unused_screenshot(session.id, image_id))
+            self.assertEqual(result.exception.status_code, 409)
+            self.assertTrue(path.exists())
+
+    def test_model_rerun_keeps_other_parallel_answer(self):
+        target = ModelTarget(source_name="test", model="model-a", reasoning_effort="low")
+        question = ChatMessage(id="question", role="user", content="hello", children_ids=["answer"])
+        answer = ChatMessage(
+            id="answer", parent_id="question", role="assistant", content="",
+            type="multi_model", is_parallel_response=True,
+            parallel_models=[
+                {"model_key": "test::model-a", "content": "old a", "model_info": {"name": "model-a", "provider": "test"}},
+                {"model_key": "test::model-b", "content": "old b", "model_info": {"name": "model-b", "provider": "test"}},
+            ],
+        )
+        session = Session(
+            id="session_test", title="test", created_at=1, updated_at=1,
+            messages=[question, answer], session_config=SessionConfig(model_targets=[target]),
+        )
+        source = SimpleNamespace(name="test", api_key="test-key", base_url="https://example.invalid")
+        provider_target = {"key": "test::model-a", "model": "model-a", "source_name": "test", "source": source, "reasoning_effort": "low"}
+        chunk = SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="new a"))])
+        completion = Mock()
+        completion.chat.completions.create.return_value = iter([chunk])
+
+        async def run():
+            response = await routes.regenerate_message(
+                session.id, question.id,
+                RegenerateMessageRequest(message_id=question.id, new_content="hello", model="test::model-a", reasoning_effort="high"),
+            )
+            return [part async for part in response.body_iterator]
+
+        with patch.object(routes.session_storage, "load_session", return_value=session), \
+             patch.object(routes.session_storage, "save_session"), \
+             patch.object(routes, "resolve_model_targets", return_value=[provider_target]), \
+             patch.object(routes, "build_message_path", return_value=[question]), \
+             patch.object(routes, "OpenAI", return_value=completion), \
+             patch.object(routes, "log_model_request_context"), \
+             patch.object(routes, "log_provider_request", return_value={}):
+            chunks = asyncio.run(run())
+
+        self.assertTrue(any('"type": "done"' in part for part in chunks))
+        self.assertEqual(len(session.messages), 2)
+        self.assertEqual(question.children_ids, ["answer"])
+        self.assertEqual(answer.parallel_models[0]["content"], "new a")
+        self.assertEqual(answer.parallel_models[0]["model_info"]["reasoning_effort"], "high")
+        self.assertEqual(answer.parallel_models[1]["content"], "old b")
+        self.assertEqual(provider_target["reasoning_effort"], "high")
+
+    def test_concurrent_chat_responses_do_not_overwrite_each_other(self):
+        session = Session(
+            id="session_test", title="test", created_at=1, updated_at=1,
+            session_config=SessionConfig(model_targets=[ModelTarget(source_name="test", model="model-a")]),
+        )
+        stored = {session.id: session.model_copy(deep=True)}
+
+        def load(session_id):
+            item = stored.get(session_id)
+            return item.model_copy(deep=True) if item else None
+
+        def save(item):
+            stored[item.id] = item.model_copy(deep=True)
+            return True
+
+        source = SimpleNamespace(name="test", api_key="test-key", base_url="https://example.invalid")
+        provider_target = {"key": "test::model-a", "model": "model-a", "source_name": "test", "source": source, "reasoning_effort": "none"}
+        chunk = SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="reply"))])
+        completion = Mock()
+        completion.chat.completions.create.side_effect = lambda **kwargs: iter([chunk])
+
+        async def run():
+            first = await routes.chat(ChatRequest(message="first", session_id=session.id))
+            second = await routes.chat(ChatRequest(message="second", session_id=session.id))
+            async def consume(response):
+                return [part async for part in response.body_iterator]
+            await asyncio.gather(consume(first), consume(second))
+
+        with patch.object(routes.session_storage, "load_session", side_effect=load), \
+             patch.object(routes.session_storage, "save_session", side_effect=save), \
+             patch.object(routes, "resolve_model_targets", return_value=[provider_target]), \
+             patch.object(routes, "OpenAI", return_value=completion), \
+             patch.object(routes, "log_model_request_context"), \
+             patch.object(routes, "log_provider_request", return_value={}), \
+             patch.object(routes, "log_model_interaction"):
+            asyncio.run(run())
+
+        saved = stored[session.id]
+        self.assertEqual([message.role for message in saved.messages], ["user", "assistant", "user", "assistant"])
+        self.assertEqual([message.content for message in saved.messages], ["first", "reply", "second", "reply"])
+        self.assertEqual(saved.messages[0].children_ids, [saved.messages[1].id])
+        self.assertEqual(saved.messages[2].children_ids, [saved.messages[3].id])
 
 
 if __name__ == "__main__":

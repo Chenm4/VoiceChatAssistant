@@ -88,6 +88,10 @@ def compose_session_system_prompt(session: Session) -> Optional[str]:
     combined prompts from receiving the same facts twice.
     """
     config = session.session_config
+    if config and config.active_scene:
+        # Scene instructions belong only to the current user request, never history.
+        rules = config.system_prompt if config.system_prompt is not None else session.system_prompt or config.scene_common_rules
+        return rules.strip() or None
     if config is not None and config.system_prompt is not None:
         rules = config.system_prompt
     else:
@@ -116,6 +120,16 @@ def compose_session_system_prompt(session: Session) -> Optional[str]:
 def render_session_user_prompt(session: Session, question: str) -> str:
     """Render the session's snapshotted user template for one question."""
     config = session.session_config
+    if config and config.active_scene:
+        scene = config.active_scene
+        parts = ["【当前场景】\n" + scene.name]
+        if scene.rules.strip():
+            parts.append("【场景要求】\n" + scene.rules.strip())
+        if scene.background.strip():
+            parts.append("【当前项目资料】\n" + scene.background.strip())
+        parts.append("历史仅供理解问题，其他项目的经历不能当作当前项目事实。")
+        parts.append("【当前问题】\n" + question)
+        return "\n\n".join(parts)
     template = config.user_prompt_template if config else None
     if not template:
         return question

@@ -47,6 +47,7 @@ class ModelInfo(BaseModel):
     id: str
     name: str
     provider: str = "unknown"  # 默认值，防止旧数据中为 None
+    reasoning_effort: Optional[str] = None
 
 
 class TokenUsage(BaseModel):
@@ -93,6 +94,9 @@ class ChatMessage(BaseModel):
     created_at: int = Field(default_factory=lambda: int(time.time()))
     children_ids: List[str] = Field(default_factory=list)  # 子消息 ID 列表
     
+    scene_name: Optional[str] = None
+    answer_versions: List[Dict] = Field(default_factory=list)
+
     # Assistant 消息专有字段
     model_info: Optional[ModelInfo] = None
     usage: Optional[TokenUsage] = None
@@ -103,9 +107,24 @@ class ChatMessage(BaseModel):
     parallel_models: Optional[List[Dict]] = None  # 多模型并行时的所有模型响应
 
 
+class PromptScene(BaseModel):
+    id: str = Field(min_length=1, max_length=100)
+    name: str = Field(min_length=1, max_length=40)
+    description: str = Field(default="", max_length=200)
+    rules: str = Field(default="", max_length=30000)
+    background: str = Field(default="", max_length=100000)
+
+
+class SceneCatalog(BaseModel):
+    common_rules: str = Field(default="回答简洁、口语化，先说重点。涉及项目经历时依据提供的资料，不编造事实。", max_length=30000)
+    scenes: List[PromptScene] = Field(default_factory=list, max_length=100)
+
+
 class SessionConfig(BaseModel):
     """会话配置"""
     model_config = {"protected_namespaces": ()}
+    active_scene: Optional[PromptScene] = None
+    scene_common_rules: str = ""
     source_name: Optional[str] = None
     models: List[str] = Field(default_factory=list)
     # New format: supports selecting models from multiple API sources.
@@ -150,6 +169,11 @@ class ChatResponse(BaseModel):
     """聊天响应模型"""
     success: bool
     message: Optional[str] = None
+
+
+class RecordingStartRequest(BaseModel):
+    input_device_index: Optional[int] = Field(default=None, ge=0)
+    input_device_name: Optional[str] = None
 
 
 class RecordingResponse(BaseModel):
@@ -202,6 +226,7 @@ class SessionList(BaseModel):
 class MessageUpdateRequest(BaseModel):
     """消息更新请求"""
     content: str
+    attachment_ids: Optional[List[str]] = None
 
 
 class BatchDeleteRequest(BaseModel):
@@ -211,6 +236,9 @@ class BatchDeleteRequest(BaseModel):
 
 class RegenerateMessageRequest(BaseModel):
     """重新生成消息请求"""
+    preserve_answer: bool = False
     message_id: str  # 要替换的消息ID
     new_content: str  # 新的消息内容
     model: Optional[str] = None  # 可选：指定使用的模型
+    reasoning_effort: Optional[Literal["none", "minimal", "low", "medium", "high", "xhigh"]] = None
+    attachment_ids: Optional[List[str]] = None

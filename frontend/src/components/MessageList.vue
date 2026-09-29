@@ -38,7 +38,7 @@
       </div>
     </div>
 
-    <div ref="container" class="chat-container" :class="{ 'selection-mode': isSelectionMode }">
+    <div ref="container" class="chat-container" :class="{ 'selection-mode': isSelectionMode, 'has-messages': messages.length > 0 }">
       <!-- 欢迎消息 -->
       <div v-if="messages.length === 0" class="welcome-state">
         <div class="welcome-symbol"><AudioLines :size="32" :stroke-width="1.4" /></div>
@@ -58,6 +58,8 @@
           { 'selected': selectedIndices.has(index) }
         ]"
       >
+        <AnswerVersions v-if="msg.role === 'user' && msg.answer_versions?.length" :versions="msg.answer_versions" />
+        <div v-if="msg.role === 'assistant' && msg.scene_name" class="answer-scene-label">场景：{{ msg.scene_name }}</div>
         <template v-if="msg.role === 'user'">
           <!-- 用户消息：复选框在右边 -->
           <div class="message-row">
@@ -69,22 +71,19 @@
                     <AppIcon name="info-circle" class=" " />
                     保存后将删除后续消息并重新生成响应
                   </div>
-                  <div v-if="msg.attachments?.length" class="message-attachments">
-                    <button
-                      v-for="attachment in msg.attachments"
-                      :key="attachment.id"
-                      type="button"
-                      class="message-attachment-link"
-                      aria-label="放大查看截图"
-                      @click="openImagePreview(attachment, $event)"
-                    >
-                      <img
-                        :src="attachmentUrl(attachment)"
-                        alt="笔试题截图"
-                        class="message-attachment-image"
-                      />
-                    </button>
+                  <div v-if="editingAttachments.length" class="message-attachments">
+                    <div v-for="attachment in editingAttachments" :key="attachment.id" class="editing-attachment">
+                      <button type="button" class="message-attachment-link" aria-label="放大查看截图" @click="openImagePreview(attachment, $event)">
+                        <img :src="attachmentUrl(attachment)" alt="消息图片" class="message-attachment-image" />
+                      </button>
+                      <button type="button" class="remove-attachment" title="移除图片" @click="removeEditingAttachment(attachment.id)">×</button>
+                    </div>
                   </div>
+                  <label class="add-attachment">
+                    + 添加图片
+                    <input type="file" accept="image/png,image/jpeg,image/webp" multiple hidden @change="addEditingImages" />
+                  </label>
+                  <button type="button" class="add-attachment" @click="emit('capture-edit-image')">拍照添加</button>
                   <textarea
                     ref="editTextarea"
                     v-model="editingContent"
@@ -93,7 +92,7 @@
                     @keydown.esc="cancelEdit"
                   ></textarea>
                   <div class="edit-actions">
-                    <button @click="saveEdit(index)" class="btn-save">
+                    <button @click="saveEdit(index)" class="btn-save" :disabled="isUploadingEditImages">
                       <AppIcon name="check" class=" " />
                       {{ willRegenerateAfterEdit ? '保存并重新生成' : '保存' }}
                     </button>
@@ -163,9 +162,8 @@
             <div class="multi-model-messages">
               <!-- 模型选择按钮组 -->
               <div class="model-selector-buttons">
+                <div v-for="(modelMsg, modelIndex) in (msg.models || msg.parallel_models || [])" :key="getModelFullName(modelMsg) || modelIndex" class="model-control-group">
                 <button
-                  v-for="(modelMsg, modelIndex) in (msg.models || msg.parallel_models || [])"
-                  :key="`selector-${modelIndex}`"
                   @click="toggleModelView(index, msg, modelIndex)"
                   class="model-selector-btn"
                   :class="{ 
@@ -181,6 +179,13 @@
                     {{ getModelDisplayName(modelMsg) }}
                   </el-tag>
                 </button>
+                  <div class="reasoning-rerun" v-if="!isSelectionMode">
+                    <select v-model="rerunEfforts[effortKey(index, msg, modelMsg)]" :aria-label="getModelDisplayName(modelMsg) + ' 的思考强度'">
+                      <option v-for="option in reasoningOptions(modelMsg)" :key="option.value" :value="option.value">{{ option.label }}</option>
+                    </select>
+                    <button type="button" :title="'仅重新回答：' + getModelDisplayName(modelMsg)" @click="rerunSelectedModel(index, msg, modelMsg)">重答</button>
+                  </div>
+                </div>
                 <button
                   v-if="getFocusedModelIndex(index, msg) !== undefined"
                   @click="exitFocused(index)"
@@ -190,6 +195,7 @@
                   <AppIcon name="columns" class=" " />
                   显示全部
                 </button>
+
               </div>
               
               <!-- 模型消息卡片容器 -->
@@ -280,6 +286,13 @@
                   <el-tag size="small" effect="plain" :type="getModelTagType(msg.model_info.provider)">
                     {{ msg.model_info.provider && msg.model_info.provider !== 'unknown' ? `${msg.model_info.provider} · ` : '' }}{{ msg.model_info.name }}
                   </el-tag>
+                  <span class="reasoning-rerun" v-if="!isSelectionMode">
+                    <span>思考强度</span>
+                    <select v-model="rerunEfforts[effortKey(index, msg, msg)]" aria-label="本次重新回答的思考强度">
+                      <option v-for="option in reasoningOptions(msg)" :key="option.value" :value="option.value">{{ option.label }}</option>
+                    </select>
+                    <button type="button" @click="rerunSelectedModel(index, msg)">重新回答</button>
+                  </span>
                 </div>
                 
                 <!-- 编辑模式 -->
@@ -359,6 +372,7 @@
 import { AudioLines, MessageSquare, Mic, ScanLine } from 'lucide-vue-next'
 import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
+import AnswerVersions from './AnswerVersions.vue'
 import { renderMarkdown } from '../utils/markdown'
 import { blobToDataUrl, copyRichContent } from '../utils/clipboard'
 
@@ -375,6 +389,8 @@ const props = defineProps({
     type: String,
     default: null
   },
+  sessionConfig: { type: Object, default: null },
+  sources: { type: Array, default: () => [] },
   fontSize: {
     type: Number,
     default: 16
@@ -385,7 +401,85 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['message-updated', 'message-deleted', 'messages-deleted', 'regenerate'])
+const emit = defineEmits(['message-updated', 'message-deleted', 'messages-deleted', 'regenerate', 'capture-edit-image'])
+
+const rerunEfforts = ref({})
+const REASONING_OPTIONS = [
+  { value: 'none', label: '无' },
+  { value: 'minimal', label: '极低' },
+  { value: 'low', label: '低' },
+  { value: 'medium', label: '中' },
+  { value: 'high', label: '高' },
+  { value: 'xhigh', label: '极高' }
+]
+
+function selectedModel(index, message) {
+  const models = getMessageModels(message)
+  return models[getFocusedModelIndex(index, message) ?? 0] || models[0]
+}
+
+function reasoningOptions(modelMessage) {
+  const name = modelMessage?.model_info?.name || modelMessage?.model || ''
+  const provider = modelMessage?.model_info?.provider || modelMessage?.source_name || ''
+  const source = props.sources.find(item => item.name === provider)
+  const identity = `${provider} ${source?.base_url || ''} ${name}`.toLowerCase()
+  if (identity.includes('api.xiaomimimo.com')) return [{ value: 'none', label: '关闭思考' }, { value: 'high', label: '开启思考' }]
+  if (identity.includes('openrouter')) {
+    return REASONING_OPTIONS.filter(option => option.value !== 'none')
+  }
+  if (identity.includes('qwen') || identity.includes('dashscope.aliyuncs.com')) {
+    return REASONING_OPTIONS.filter(option => ['none', 'low', 'medium', 'xhigh'].includes(option.value))
+  }
+  if (
+    identity.includes('api.openai.com') && /^(gpt-[56]|o[134](?:-|$))/i.test(name)
+  ) return REASONING_OPTIONS
+  return REASONING_OPTIONS.slice(0, 1)
+}
+
+function defaultEffortForModel(modelMessage) {
+  const model = getModelFullName(modelMessage)
+  const configured = modelMessage?.model_info?.reasoning_effort || props.sessionConfig?.model_targets?.find(target => (
+    `${target.source_name}::${target.model}` === model
+  ))?.reasoning_effort
+  const allowed = reasoningOptions(modelMessage)
+  return allowed.some(option => option.value === configured) ? configured : allowed[0].value
+}
+
+function rerunSelectedModel(index, message, targetModel = null) {
+  const modelMessage = targetModel || (message.model_info ? message : selectedModel(index, message))
+  const model = getModelFullName(modelMessage)
+  const parent = props.messages.find(item => item.id === message.parent_id)
+    || [...props.messages.slice(0, index)].reverse().find(item => item.role === 'user')
+  if (!model || !parent?.id) {
+    ElMessage.error('找不到该回答关联的模型或问题')
+    return
+  }
+  const allowed = reasoningOptions(modelMessage)
+  const effort = rerunEfforts.value[effortKey(index, message, modelMessage)]
+  emit('regenerate', {
+    messageId: parent.id,
+    newContent: parent.content,
+    model,
+    reasoningEffort: allowed.some(option => option.value === effort) ? effort : allowed[0].value,
+    targeted: true
+  })
+}
+
+function effortKey(index, message, modelMessage) {
+  return `${props.currentSessionId}:${message.id || index}:${getModelFullName(modelMessage)}`
+}
+watch([() => props.messages.map(message => [message.id, message.role, message.model_info?.reasoning_effort, ...getMessageModels(message).map(model => `${getModelFullName(model)}:${model.model_info?.reasoning_effort || ''}`)]), () => props.sessionConfig], () => {
+  const next = {}
+  props.messages.forEach((message, index) => {
+    if (message.role !== 'assistant') return
+    const models = message.model_info ? [message] : getMessageModels(message)
+    models.forEach(model => {
+      const key = effortKey(index, message, model)
+      next[key] = rerunEfforts.value[key] ?? defaultEffortForModel(model)
+    })
+  })
+  rerunEfforts.value = next
+}, { immediate: true })
 
 function attachmentUrl(attachment) {
   if (!props.currentSessionId || !attachment?.id) return ''
@@ -414,6 +508,7 @@ function closeImagePreview() {
 watch(() => props.currentSessionId, () => {
   previewImageUrl.value = ''
   imagePreviewTrigger = null
+  if (editingIndex.value !== null) cancelEdit()
 })
 
 // 根据 provider 返回不同的标签类型
@@ -509,6 +604,70 @@ const editTextarea = ref(null)
 // 编辑相关
 const editingIndex = ref(null)
 const editingContent = ref('')
+const editingAttachments = ref([])
+const isUploadingEditImages = ref(false)
+const newEditingImageIds = new Set()
+const editingSessionId = ref(null)
+let editUploadVersion = 0
+
+function releaseUnusedEditingImage(id, sessionId = editingSessionId.value) {
+  if (!sessionId || !id) return
+  fetch(`/api/attachments/${encodeURIComponent(sessionId)}/${encodeURIComponent(id)}`, {
+    method: 'DELETE'
+  }).catch(error => console.warn('清理未使用图片失败:', error))
+}
+
+function discardNewEditingImages() {
+  for (const id of newEditingImageIds) releaseUnusedEditingImage(id)
+  newEditingImageIds.clear()
+}
+
+function removeEditingAttachment(id) {
+  if (newEditingImageIds.has(id)) {
+    releaseUnusedEditingImage(id)
+    newEditingImageIds.delete(id)
+  }
+  editingAttachments.value = editingAttachments.value.filter(item => item.id !== id)
+}
+
+function addCapturedEditingImage(attachment, sessionId) {
+  if (editingIndex.value === null || props.currentSessionId !== sessionId) return false
+  newEditingImageIds.add(attachment.id)
+  editingAttachments.value.push(attachment)
+  return true
+}
+
+async function addEditingImages(event) {
+  const files = Array.from(event.target.files || [])
+  event.target.value = ''
+  if (!props.currentSessionId || !files.length) return
+  const version = editUploadVersion
+  const sessionId = props.currentSessionId
+  isUploadingEditImages.value = true
+  try {
+    for (const file of files) {
+      const form = new FormData()
+      form.append('session_id', sessionId)
+      form.append('screenshot', file, file.name)
+      const response = await fetch('/api/attachments/screenshots', { method: 'POST', body: form })
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}))
+        throw new Error(error.detail || `图片上传失败 (${response.status})`)
+      }
+      const attachment = await response.json()
+      if (version !== editUploadVersion || sessionId !== props.currentSessionId) {
+        releaseUnusedEditingImage(attachment.id, sessionId)
+        return
+      }
+      newEditingImageIds.add(attachment.id)
+      editingAttachments.value.push(attachment)
+    }
+  } catch (error) {
+    ElMessage.error(error.message || '添加图片失败')
+  } finally {
+    isUploadingEditImages.value = false
+  }
+}
 
 // 选择相关
 const isSelectionMode = ref(false)
@@ -571,12 +730,14 @@ watch(() => props.messages.length, (newCount) => {
   }
 })
 
-// 自动滚动到底部（已禁用，用户可手动滚动）
+// 发送后让最新消息保持可见；额外的底部阅读空间仍可手动滚入。
 function scrollToBottom() {
   nextTick(() => {
-    if (container.value) {
-      container.value.scrollTop = container.value.scrollHeight
-    }
+    const scroller = container.value
+    const lastMessage = scroller?.querySelector('.message:last-of-type')
+    if (!lastMessage) return
+    const distance = lastMessage.getBoundingClientRect().bottom - scroller.getBoundingClientRect().bottom + 20
+    scroller.scrollTop += distance
   })
 }
 
@@ -586,8 +747,12 @@ function scrollToBottom() {
 
 // 开始编辑
 function startEdit(index, content) {
+  editUploadVersion++
+  discardNewEditingImages()
   editingIndex.value = index
+  editingSessionId.value = props.currentSessionId
   editingContent.value = content
+  editingAttachments.value = [...(props.messages[index]?.attachments || [])]
   nextTick(() => {
     if (editTextarea.value && editTextarea.value.length > 0) {
       editTextarea.value[0].focus()
@@ -602,7 +767,8 @@ const willRegenerateAfterEdit = ref(false)
 
 // 保存编辑
 async function saveEdit(index) {
-  if (!editingContent.value.trim() && !props.messages[index]?.attachments?.length) {
+  if (isUploadingEditImages.value) return
+  if (!editingContent.value.trim() && !editingAttachments.value.length) {
     ElMessage.warning('消息内容不能为空')
     return
   }
@@ -611,15 +777,20 @@ async function saveEdit(index) {
     const message = props.messages[index]
     const messageId = message.id || `msg_${index}`
     const newContent = editingContent.value.trim()
+    const attachmentIds = message.role === 'user'
+      ? editingAttachments.value.map(item => item.id)
+      : undefined
     
     // 如果标记为需要重新生成，则触发重新生成
     if (willRegenerateAfterEdit.value && message.role === 'user') {
       editingIndex.value = null
       editingContent.value = ''
       willRegenerateAfterEdit.value = false
+      newEditingImageIds.clear()
+      editingSessionId.value = null
       
       // 触发重新生成
-      emit('regenerate', { messageId, newContent })
+      emit('regenerate', { messageId, newContent, attachmentIds })
       return
     }
     
@@ -630,7 +801,8 @@ async function saveEdit(index) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        content: newContent
+        content: newContent,
+        attachment_ids: attachmentIds
       })
     })
 
@@ -642,6 +814,9 @@ async function saveEdit(index) {
     emit('message-updated')
     editingIndex.value = null
     editingContent.value = ''
+    editingAttachments.value = []
+    newEditingImageIds.clear()
+    editingSessionId.value = null
   } catch (error) {
     console.error('保存编辑失败:', error)
     ElMessage.error(`保存失败: ${error.message}`)
@@ -650,8 +825,12 @@ async function saveEdit(index) {
 
 // 取消编辑
 function cancelEdit() {
+  editUploadVersion++
+  discardNewEditingImages()
   editingIndex.value = null
+  editingSessionId.value = null
   editingContent.value = ''
+  editingAttachments.value = []
   willRegenerateAfterEdit.value = false
 }
 
@@ -881,6 +1060,7 @@ function enterFocused(messageIndex, msg, modelIndex) {
   const modelName = getModelFullName(models[modelIndex])
   
   fullscreenModelIndex.value[messageIndex] = modelIndex
+
   fullscreenModelIndex.value = { ...fullscreenModelIndex.value }
   activeFocusedMessageIndex.value = messageIndex
   
@@ -892,6 +1072,8 @@ function enterFocused(messageIndex, msg, modelIndex) {
 
 function exitFocused(messageIndex) {
   fullscreenModelIndex.value[messageIndex] = null
+  const message = props.messages[messageIndex]
+
   fullscreenModelIndex.value = { ...fullscreenModelIndex.value }
   if (activeFocusedMessageIndex.value === messageIndex) {
     activeFocusedMessageIndex.value = null
@@ -1010,16 +1192,19 @@ onBeforeUnmount(() => {
 })
 
 defineExpose({
-  scrollToBottom
+  scrollToBottom,
+  addCapturedEditingImage
 })
 </script>
 
 <style scoped>
+.answer-scene-label { color:#64748b; font-size:12px; margin:4px 0 8px 40px; }
 .message-list-wrapper {
   --message-font-size: 16px;
   --message-line-height: 1.7;
   width: 100%;
   height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
@@ -1098,14 +1283,22 @@ defineExpose({
 
 .chat-container {
   flex: 1;
+  min-height: 0;
+  box-sizing: border-box;
   width: 100%;
   max-width: 1280px;
   margin: 0 auto;
   padding: 28px 32px 48px;
   overflow-y: auto;
   overflow-x: hidden;
-  scroll-behavior: smooth;
+  scroll-behavior: auto;
   background: #f7f9fc;
+}
+
+.chat-container.has-messages::after {
+  content: '';
+  display: block;
+  height: clamp(180px, 42vh, 560px);
 }
 
 .chat-container.selection-mode {
@@ -1220,6 +1413,46 @@ defineExpose({
   gap: 8px;
   margin-bottom: 10px;
 }
+
+.editing-attachment { position: relative; min-width: 0; }
+.remove-attachment {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 27px;
+  height: 27px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(15, 23, 42, .82);
+  color: white;
+  cursor: pointer;
+  font-size: 19px;
+  line-height: 1;
+}
+.add-attachment {
+  display: inline-flex;
+  margin-bottom: 10px;
+  padding: 6px 11px;
+  border: 1px dashed #93c5fd;
+  border-radius: 9px;
+  color: #2563eb;
+  background: #eff6ff;
+  cursor: pointer;
+  font-size: 13px;
+}
+.model-control-group { display:inline-flex; align-items:center; gap:5px; flex-wrap:wrap; padding:3px; border:1px solid #e2e8f0; border-radius:10px; }
+.reasoning-rerun { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; }
+.reasoning-rerun select, .reasoning-rerun button {
+  border: 1px solid #dbe2ef;
+  border-radius: 8px;
+  padding: 4px 7px;
+  background: #fff;
+  color: #475569;
+  font-size: 12px;
+  cursor: pointer;
+}
+.reasoning-rerun button { color: #2563eb; }
+.reasoning-rerun button:hover { background: #eff6ff; }
 
 .message-attachment-link {
   display: block;
@@ -1699,6 +1932,7 @@ defineExpose({
   transform: translateY(-2px);
   box-shadow: 0 4px 12px rgba(59, 130, 246, 0.35);
 }
+.btn-save:disabled { opacity: .55; cursor: wait; transform: none; }
 
 .btn-cancel {
   background: #e2e8f0;

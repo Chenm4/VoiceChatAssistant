@@ -4,13 +4,14 @@
     type="button"
     class="capture-float-button"
     :class="{ connected, loading, ready }"
-    :disabled="disabled"
-    :title="connected ? '截图并直接发送（可拖动，右键复位）' : '选择窗口或标签页并截图（可拖动，右键复位）'"
+    :aria-disabled="disabled"
+    :title="connected ? '左键拍照，右键取消共享（Shift + 右键复位位置）' : '左键选择窗口拍照，右键取消（Shift + 右键复位位置）'"
     aria-label="截图答题"
     @pointerdown="handlePointerDown"
-    @contextmenu.prevent="resetPosition"
-    @keydown.enter.prevent="$emit('capture')"
-    @keydown.space.prevent="$emit('capture')"
+    @wheel="handleWheel"
+    @contextmenu.prevent="handleContextMenu"
+    @keydown.enter.prevent="!disabled && $emit('capture')"
+    @keydown.space.prevent="!disabled && $emit('capture')"
   >
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M4 7.5h3l1.4-2h7.2l1.4 2h3v11H4z" />
@@ -23,13 +24,13 @@
 <script setup>
 import { nextTick, onMounted, onUnmounted, ref } from 'vue'
 
-defineProps({
+const props = defineProps({
   connected: { type: Boolean, default: false },
   loading: { type: Boolean, default: false },
   disabled: { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['capture'])
+const emit = defineEmits(['capture', 'cancel'])
 const button = ref(null)
 const ready = ref(false)
 const STORAGE_KEY = 'captureButtonPosition'
@@ -102,7 +103,22 @@ function resetPosition() {
   positionAtDefaultAnchor()
 }
 
+function handleContextMenu(event) {
+  if (event.shiftKey) resetPosition()
+  else emit('cancel')
+}
+
+function handleWheel(event) {
+  if (event.ctrlKey) return
+  const scroller = button.value?.closest('.chat-view')?.querySelector('.chat-container')
+  if (!scroller) return
+  event.preventDefault()
+  const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? scroller.clientHeight : 1
+  scroller.scrollBy(event.deltaX * unit, event.deltaY * unit)
+}
+
 function handlePointerDown(event) {
+  if (props.disabled) return
   if (event.button !== undefined && event.button !== 0) return
   event.preventDefault()
   pointerId = event.pointerId
@@ -153,7 +169,7 @@ function handlePointerUp(event) {
   if (moved) {
     customPosition = true
     savePosition()
-  } else {
+  } else if (!props.disabled) {
     emit('capture')
   }
   pointerId = null

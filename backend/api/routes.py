@@ -23,11 +23,13 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from backend.api.models import (
     ConfigModel,
+    SceneCatalog,
     ConfigSource,
     ConfigList,
     ChatRequest, 
     ChatResponse,
     RecordingResponse,
+    RecordingStartRequest,
     ChatMessage,
     Session,
     SessionList,
@@ -321,6 +323,8 @@ def trim_history_context(
 
 # 创建路由器
 router = APIRouter()
+# Invalidate outstanding generations when a newer request/config takes over.
+generation_epochs: Dict[str, str] = {}
 
 # 全局服务实例
 audio_recorder = AudioRecorder()
@@ -369,7 +373,11 @@ def save_config_to_file():
             config_lines.append("    {")
             config_lines.append(f'        "name": "{source.name}",')
             # 如果 API key 为空，添加注释
-            if source.api_key:
+            if "api.xiaomimimo.com" in source.base_url:
+                from backend.services.provider_secrets import save_xiaomi_key
+                save_xiaomi_key(source.api_key)
+                config_lines.append('        "api_key": load_xiaomi_key(),')
+            elif source.api_key:
                 config_lines.append(f'        "api_key": "{source.api_key}",')
             else:
                 config_lines.append(f'        "api_key": "",  # 填写您的 {source.name} API Key')
@@ -404,6 +412,21 @@ api_config = ConfigModel(
 )
 
 
+async def iterate_provider_stream(stream):
+    """Keep synchronous SDK reads off the event loop so scene changes stay responsive."""
+    sentinel = object()
+    try:
+        while True:
+            chunk = await asyncio.to_thread(next, stream, sentinel)
+            if chunk is sentinel:
+                break
+            yield chunk
+    finally:
+        close = getattr(stream, "close", None)
+        if close:
+            await asyncio.to_thread(close)
+
+
 def get_chat_completion_extra_params(
     source: Optional[ConfigSource],
     model: str,
@@ -417,6 +440,16 @@ def get_chat_completion_extra_params(
         "none", "minimal", "low", "medium", "high", "xhigh"
     } else "none"
     
+    if "api.xiaomimimo.com" in base_url:
+        return {"extra_body": {"thinking": {"type": "disabled" if effort == "none" else "enabled"}}}
+
+    # Legacy 'none' defaults now mean minimal on OpenRouter, never disabled.
+    # Resolve the gateway before model families (including Qwen routed through it).
+    if source_name == "openrouter" or "openrouter.ai" in base_url:
+        if effort == "none":
+            effort = "minimal"
+        return {"extra_body": {"reasoning": {"effort": effort}}}
+
     if (
         source_name == "qwen"
         or "dashscope.aliyuncs.com" in base_url
@@ -427,9 +460,6 @@ def get_chat_completion_extra_params(
         # openai 1.x forwards extra_body at the JSON top level. DashScope's
         # OpenAI-compatible endpoint accepts reasoning_effort there.
         return {"extra_body": {"reasoning_effort": effort}}
-
-    if source_name == "openrouter" or "openrouter.ai" in base_url:
-        return {"extra_body": {"reasoning": {"effort": effort}}}
 
     openai_reasoning_model = bool(re.match(r"^(gpt-[56]|o[134](?:-|$))", model_name))
     if (
@@ -511,6 +541,10 @@ def resolve_model_targets(
                 detail=f"请先配置 {source_name} 的 API Key",
             )
         seen.add(key)
+        if reasoning_effort == "none" and (
+            source.name.lower() == "openrouter" or "openrouter.ai" in source.base_url.lower()
+        ):
+            reasoning_effort = "minimal"
         resolved.append({
             "key": key,
             "source_name": source_name,
@@ -674,6 +708,13 @@ def _delete_screenshot_files(
         directory.rmdir()
     except OSError:
         pass
+
+
+def _unreferenced_attachment_ids(session: Session, attachment_ids: List[str]) -> List[str]:
+    referenced = {
+        attachment.id for message in session.messages for attachment in message.attachments
+    }
+    return [attachment_id for attachment_id in attachment_ids if attachment_id not in referenced]
 
 
 def _detect_screenshot_mime(data: bytes) -> Optional[str]:
@@ -1019,8 +1060,29 @@ async def delete_config_source(source_name: str):
     return {"success": True, "message": f"配置源 {source_name} 已删除并保存"}
 
 
+@router.get("/recording/devices")
+def get_recording_devices():
+    """列出实际执行录音的主机上的输入设备。"""
+    import pyaudio
+
+    audio = pyaudio.PyAudio()
+    try:
+        try:
+            default_index = int(audio.get_default_input_device_info()['index'])
+        except OSError:
+            default_index = None
+        devices = []
+        for index in range(audio.get_device_count()):
+            info = audio.get_device_info_by_index(index)
+            if info['maxInputChannels'] > 0:
+                devices.append({'index': index, 'name': info['name']})
+        return {'devices': devices, 'default_index': default_index}
+    finally:
+        audio.terminate()
+
+
 @router.post("/recording/start")
-async def start_recording():
+async def start_recording(request: Optional[RecordingStartRequest] = None):
     """开始录音 - 实时流式模式（支持预热加速）"""
     global streaming_asr, streaming_asr_pool
     
@@ -1060,6 +1122,8 @@ async def start_recording():
 
         # Capture ownership now so later session switches cannot reassign audio.
         temp_asr.session_id = current_session_id
+        temp_asr.input_device_index = request.input_device_index if request else None
+        temp_asr.requested_device_name = request.input_device_name if request else None
         
         # 启动实时识别（作为后台任务）
         logger.info("🚀 [启动任务] 启动实时识别任务（录音将立即开始）...")
@@ -1234,6 +1298,22 @@ async def get_screenshot(session_id: str, attachment_id: str):
     return FileResponse(path, media_type=media_type)
 
 
+@router.delete("/attachments/{session_id}/{attachment_id}")
+async def delete_unused_screenshot(session_id: str, attachment_id: str):
+    """Discard an uploaded image that was never attached to a saved message."""
+    session = session_storage.load_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if any(
+        attachment.id == attachment_id
+        for message in session.messages for attachment in message.attachments
+    ):
+        raise HTTPException(status_code=409, detail="图片已被消息使用")
+    path = _find_screenshot(session_id, attachment_id)
+    path.unlink()
+    return {"success": True}
+
+
 @router.post("/chat")
 async def chat(request: ChatRequest):
     """发送消息（流式返回）- 支持树形对话和并行响应"""
@@ -1250,6 +1330,7 @@ async def chat(request: ChatRequest):
             raise HTTPException(status_code=404, detail="会话不存在")
     else:
         current_session = get_current_session()
+    chat_epoch = generation_epochs.get(current_session.id)
     session_config = current_session.session_config
     message_attachments = _load_message_attachments(
         current_session.id, request.attachment_ids
@@ -1289,6 +1370,29 @@ async def chat(request: ChatRequest):
     # 如果是第一条消息，自动生成标题（取前20个字符）
     if len(current_session.messages) == 1 and current_session.title == "新对话":
         current_session.title = request.message[:20] + ("..." if len(request.message) > 20 else "")
+
+    # Persist the question before streaming so another screenshot can start
+    # immediately and see it. There is no await between load/save below.
+    if not session_storage.save_session(current_session):
+        raise HTTPException(status_code=500, detail="保存问题失败")
+
+    def save_chat_answer(assistant_msg: ChatMessage) -> None:
+        """Merge this answer into the latest session instead of a stale snapshot."""
+        if generation_epochs.get(current_session.id) != chat_epoch:
+            raise asyncio.CancelledError()
+        latest_session = session_storage.load_session(current_session.id)
+        if not latest_session:
+            raise RuntimeError("会话已被删除，无法保存回答")
+        for index, message in enumerate(latest_session.messages):
+            if message.id == user_msg_id:
+                if assistant_msg.id not in message.children_ids:
+                    message.children_ids.append(assistant_msg.id)
+                latest_session.messages.insert(index + 1, assistant_msg)
+                latest_session.updated_at = int(time.time())
+                if not session_storage.save_session(latest_session):
+                    raise RuntimeError("保存回答失败")
+                return
+        raise RuntimeError("找不到本次问题，无法保存回答")
 
     context_settings = resolve_chat_context_config(session_config)
     
@@ -1388,6 +1492,7 @@ async def chat(request: ChatRequest):
         return scoped_messages
     
     async def generate():
+        tasks = []
         import asyncio
         try:
             logger.info(f"📝 会话总消息数: {len(current_session.messages)}")
@@ -1420,6 +1525,7 @@ async def chat(request: ChatRequest):
                         'model': model_name,
                         'model_key': target['key'],
                         'source_name': target['source_name'],
+                        'reasoning_effort': target['reasoning_effort'],
                     }
                 
                 logger.info(f"🚀 并行调用 {len(models_to_use)} 个模型")
@@ -1548,6 +1654,7 @@ async def chat(request: ChatRequest):
                             'model': result['model'],
                             'model_key': result['model_key'],
                             'source_name': result['source_name'],
+                            'reasoning_effort': result['reasoning_effort'],
                             'content': result['content'],
                             'latency_ms': int((time.time() - result['start_time']) * 1000)
                         })
@@ -1570,7 +1677,8 @@ async def chat(request: ChatRequest):
                         "model_info": {
                             "id": model_data['model_key'],
                             "name": model_data['model'],
-                            "provider": model_data['source_name']
+                            "provider": model_data['source_name'],
+                            "reasoning_effort": model_data['reasoning_effort'],
                         }
                     })
                 
@@ -1579,6 +1687,7 @@ async def chat(request: ChatRequest):
                     id=assistant_msg_id,
                     parent_id=user_msg_id,
                     role="assistant",
+                    scene_name=session_config.active_scene.name if session_config and session_config.active_scene else None,
                     content="",  # 容器消息内容为空
                     type="multi_model",  # 标记为多模型类型
                     created_at=assistant_msg_time,
@@ -1587,11 +1696,7 @@ async def chat(request: ChatRequest):
                     parallel_models=parallel_models_data  # 保存所有模型的响应
                 )
                 
-                user_message.children_ids.append(assistant_msg_id)
-                current_session.messages.append(assistant_msg)
-                
-                current_session.updated_at = int(time.time())
-                session_storage.save_session(current_session)
+                save_chat_answer(assistant_msg)
                 
                 # 记录每个模型的交互
                 for idx, model_data in enumerate(parallel_models_data):
@@ -1646,13 +1751,13 @@ async def chat(request: ChatRequest):
                 )
                 request_preview = log_provider_request(source_to_use, request_params)
                 yield f"data: {json.dumps({'type': 'provider_request', 'stage': 'chat', 'model_key': target['key'], 'request': request_preview}, ensure_ascii=False)}\n\n"
-                stream = client.chat.completions.create(**request_params)
+                stream = await asyncio.to_thread(client.chat.completions.create, **request_params)
                 
                 assistant_message = ''
                 chunk_count = 0
                 last_log_time = time.time()
                 
-                for chunk in stream:
+                async for chunk in iterate_provider_stream(stream):
                     if not chunk.choices:
                         continue
                     content = chunk.choices[0].delta.content
@@ -1696,6 +1801,7 @@ async def chat(request: ChatRequest):
                     id=assistant_msg_id,
                     parent_id=user_msg_id,
                     role="assistant",
+                    scene_name=session_config.active_scene.name if session_config and session_config.active_scene else None,
                     content=assistant_message,
                     type="text",
                     created_at=assistant_msg_time,
@@ -1703,7 +1809,8 @@ async def chat(request: ChatRequest):
                     model_info={
                         "id": target['key'],
                         "name": model_to_use,
-                        "provider": source_to_use.name if source_to_use else "unknown"
+                        "provider": source_to_use.name if source_to_use else "unknown",
+                        "reasoning_effort": target['reasoning_effort'],
                     },
                     usage={
                         "prompt_tokens": 0,
@@ -1715,14 +1822,7 @@ async def chat(request: ChatRequest):
                 )
                 
                 # 更新用户消息的 children_ids
-                user_message.children_ids.append(assistant_msg_id)
-                
-                # 添加助手消息到当前会话
-                current_session.messages.append(assistant_msg)
-                current_session.updated_at = assistant_msg_time
-                
-                # 保存到存储
-                session_storage.save_session(current_session)
+                save_chat_answer(assistant_msg)
                 
                 logger.info(f"💾 AI 回复完成并保存，总长度: {len(assistant_message)}, session={current_session.id}")
                 
@@ -1743,6 +1843,12 @@ async def chat(request: ChatRequest):
                         stage="streaming"
                     )
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
     
     return StreamingResponse(
         generate(), 
@@ -2182,10 +2288,25 @@ async def update_message(session_id: str, message_id: str, request: MessageUpdat
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
     
+    # Validate every new image before changing the persisted message.
+    replacement_attachments = (
+        _load_message_attachments(session_id, request.attachment_ids)
+        if request.attachment_ids is not None else None
+    )
+    removed_attachment_ids = []
+
     # 查找消息
     message_found = False
     for msg in session.messages:
         if msg.id == message_id:
+            if replacement_attachments is not None:
+                if msg.role != "user":
+                    raise HTTPException(status_code=400, detail="只能编辑用户消息的图片")
+                new_ids = {attachment.id for attachment in replacement_attachments}
+                removed_attachment_ids = [attachment.id for attachment in msg.attachments if attachment.id not in new_ids]
+                existing = {attachment.id: attachment for attachment in msg.attachments}
+                msg.attachments = [existing.get(attachment.id, attachment) for attachment in replacement_attachments]
+                msg.type = "image" if replacement_attachments else "text"
             msg.content = request.content
             msg.created_at = int(time.time())  # 更新时间戳
             message_found = True
@@ -2196,6 +2317,8 @@ async def update_message(session_id: str, message_id: str, request: MessageUpdat
     
     session.updated_at = int(time.time())
     session_storage.save_session(session)
+    if removed_attachment_ids:
+        _delete_screenshot_files(session_id, _unreferenced_attachment_ids(session, removed_attachment_ids))
     
     logger.info(f"更新消息: session={session_id}, message_id={message_id}")
     
@@ -2293,6 +2416,21 @@ def collect_descendant_ids(session: Session, message_id: str) -> set:
     return descendants
 
 
+@router.get("/prompt-scenes")
+async def get_prompt_scenes():
+    from backend.services.prompt_scenes import load_catalog
+    return load_catalog()
+
+
+@router.put("/prompt-scenes")
+async def put_prompt_scenes(catalog: SceneCatalog):
+    from backend.services.prompt_scenes import save_catalog
+    if len({scene.id for scene in catalog.scenes}) != len(catalog.scenes):
+        raise HTTPException(status_code=400, detail="场景 ID 不能重复")
+    save_catalog(catalog)
+    return catalog
+
+
 @router.put("/sessions/{session_id}/config")
 async def update_session_config(session_id: str, config: SessionConfig):
     """
@@ -2347,12 +2485,23 @@ async def update_session_config(session_id: str, config: SessionConfig):
             if target.source_name == first_source
         ]
     
+    previous_config = session.session_config
+    if (config.active_scene and previous_config and previous_config.active_scene
+            and previous_config.active_scene.id == config.active_scene.id
+            and previous_config.active_scene != config.active_scene):
+        from backend.services.prompt_scenes import load_catalog, save_catalog
+        catalog = load_catalog()
+        catalog.scenes = [config.active_scene if item.id == config.active_scene.id else item for item in catalog.scenes]
+        save_catalog(catalog)
+
+    generation_epochs[session_id] = uuid.uuid4().hex
     # 更新会话配置
     session.session_config = config
     session.updated_at = int(time.time())
     
     # 保存到磁盘
-    session_storage.save_session(session)
+    if not session_storage.save_session(session):
+        raise HTTPException(status_code=500, detail="保存会话配置失败")
     
     # 如果是当前会话，更新缓存（重要：必须更新，否则下次聊天会使用旧配置）
     global current_session_cache
@@ -2522,18 +2671,81 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
     if target_message.role != "user":
         raise HTTPException(status_code=400, detail="只能重新生成用户消息的响应")
     
+    if request.preserve_answer and (request.new_content != target_message.content or request.attachment_ids is not None):
+        raise HTTPException(status_code=400, detail="场景重答必须保留原始问题和附件")
+
+    generation_epoch = uuid.uuid4().hex
+    generation_epochs[session_id] = generation_epoch
+
+    def save_current_generation():
+        if generation_epochs.get(session_id) != generation_epoch:
+            raise asyncio.CancelledError()
+        if not session_storage.save_session(session):
+            raise RuntimeError("保存回答失败")
+
     session_config = session.session_config
     context_settings = resolve_chat_context_config(session_config)
     model_targets = resolve_model_targets(session_config, request.model)
+    if request.reasoning_effort is not None:
+        if len(model_targets) != 1:
+            raise HTTPException(status_code=400, detail="请选择单个模型后设置本次思考强度")
+        model_targets[0]["reasoning_effort"] = request.reasoning_effort
     models_to_use = [target["model"] for target in model_targets]
-    
+
+    replacement_attachments = (
+        _load_message_attachments(session_id, request.attachment_ids)
+        if request.attachment_ids is not None else None
+    )
+    removed_attachment_ids = []
+    if replacement_attachments is not None:
+        new_ids = {attachment.id for attachment in replacement_attachments}
+        removed_attachment_ids = [attachment.id for attachment in target_message.attachments if attachment.id not in new_ids]
+        existing = {attachment.id: attachment for attachment in target_message.attachments}
+        target_message.attachments = [existing.get(attachment.id, attachment) for attachment in replacement_attachments]
+        target_message.type = "image" if replacement_attachments else "text"
+
+    # A model-only rerun keeps the other answers and the later conversation.
+    existing_assistant = next((
+        msg for msg in session.messages
+        if msg.id in target_message.children_ids and msg.role == "assistant"
+    ), None)
+    selected_target = model_targets[0] if len(model_targets) == 1 else None
+    existing_model_entry = None
+    if existing_assistant and selected_target and existing_assistant.parallel_models:
+        existing_model_entry = next((
+            entry for entry in existing_assistant.parallel_models
+            if entry.get("model_key") == selected_target["key"]
+            or (
+                entry.get("model_info", {}).get("name") == selected_target["model"]
+                and entry.get("model_info", {}).get("provider") == selected_target["source_name"]
+            )
+        ), None)
+    targeted_rerun = bool(
+        request.model and request.reasoning_effort is not None
+        and request.new_content == target_message.content
+        and request.attachment_ids is None
+        and existing_assistant
+        and (existing_model_entry or (
+            existing_assistant.model_info
+            and existing_assistant.model_info.name == selected_target["model"]
+            and existing_assistant.model_info.provider == selected_target["source_name"]
+        ))
+    )
+    if request.model and request.reasoning_effort is not None and not targeted_rerun:
+        raise HTTPException(status_code=409, detail="目标模型的原回答已变化，请刷新消息后重试")
+
+    if request.preserve_answer:
+        for answer in session.messages:
+            if answer.id in target_message.children_ids and answer.role == "assistant":
+                target_message.answer_versions.append(answer.dict(exclude={"answer_versions"}))
+
     # 更新消息内容
     target_message.content = request.new_content
     target_message.created_at = int(time.time())
     
     # 只删除目标消息的直接子消息（即 AI 的回答），保留后续对话
     # 收集要删除的直接子消息和它们的子消息信息
-    direct_children_to_delete = list(target_message.children_ids)  # 直接子消息（回答）
+    direct_children_to_delete = [] if targeted_rerun else list(target_message.children_ids)
     grandchildren_ids = []  # 孙子消息（后续对话的第一条）
     
     # 创建消息ID到消息的映射
@@ -2548,7 +2760,8 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
     logger.info(f"删除 {len(direct_children_to_delete)} 条直接回复，保留 {len(grandchildren_ids)} 条后续消息")
     
     # 清空目标消息的子消息列表（稍后会添加新的回答）
-    target_message.children_ids = []
+    if not targeted_rerun:
+        target_message.children_ids = []
     
     # 从会话中删除直接子消息
     session.messages = [msg for msg in session.messages if msg.id not in direct_children_to_delete]
@@ -2564,7 +2777,9 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
     
     # 保存会话
     session.updated_at = int(time.time())
-    session_storage.save_session(session)
+    save_current_generation()
+    if removed_attachment_ids:
+        _delete_screenshot_files(session_id, _unreferenced_attachment_ids(session, removed_attachment_ids))
     
     # 构建消息历史（到目标消息为止）
     messages_history = build_message_path(session, message_id)
@@ -2667,6 +2882,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
         return scoped_messages
     
     async def generate():
+        tasks = []
         import asyncio
         import uuid
         
@@ -2699,6 +2915,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                         'model': model_name,
                         'model_key': target['key'],
                         'source_name': target['source_name'],
+                        'reasoning_effort': target['reasoning_effort'],
                     }
                 
                 chunk_queue = asyncio.Queue()
@@ -2814,6 +3031,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                             'model': result['model'],
                             'model_key': result['model_key'],
                             'source_name': result['source_name'],
+                            'reasoning_effort': result['reasoning_effort'],
                             'content': result['content'],
                             'latency_ms': int((time.time() - result['start_time']) * 1000)
                         })
@@ -2833,7 +3051,8 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                         "model_info": {
                             "id": model_data['model_key'],
                             "name": model_data['model'],
-                            "provider": model_data['source_name']
+                            "provider": model_data['source_name'],
+                            "reasoning_effort": model_data['reasoning_effort'],
                         }
                     })
                 
@@ -2841,6 +3060,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                     id=assistant_msg_id,
                     parent_id=message_id,
                     role="assistant",
+                    scene_name=session_config.active_scene.name if session_config and session_config.active_scene else None,
                     content="",
                     type="multi_model",
                     created_at=assistant_msg_time,
@@ -2868,7 +3088,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                 logger.info(f"新消息插入到位置 {insert_position}")
                 
                 session.updated_at = int(time.time())
-                session_storage.save_session(session)
+                save_current_generation()
                 
                 # 记录每个模型的交互
                 for model_data in parallel_models_data:
@@ -2924,12 +3144,12 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                 )
                 request_preview = log_provider_request(source_to_use, request_params)
                 yield f"data: {json.dumps({'type': 'provider_request', 'stage': 'regenerate', 'model_key': target['key'], 'request': request_preview}, ensure_ascii=False)}\n\n"
-                stream = client.chat.completions.create(**request_params)
+                stream = await asyncio.to_thread(client.chat.completions.create, **request_params)
                 
                 assistant_message = ''
                 chunk_count = 0
                 
-                for chunk in stream:
+                async for chunk in iterate_provider_stream(stream):
                     if not chunk.choices:
                         continue
                     content = chunk.choices[0].delta.content
@@ -2943,6 +3163,20 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                 
                 latency_ms = int((time.time() - start_time) * 1000)
                 logger.info(f"流式发送完成: {chunk_count} 个chunks")
+
+                if targeted_rerun:
+                    if existing_model_entry is not None:
+                        existing_model_entry["content"] = assistant_message
+                        existing_model_entry["latency_ms"] = latency_ms
+                        existing_model_entry.setdefault("model_info", {})["reasoning_effort"] = target['reasoning_effort']
+                    else:
+                        existing_assistant.content = assistant_message
+                        existing_assistant.latency_ms = latency_ms
+                        existing_assistant.model_info.reasoning_effort = target['reasoning_effort']
+                    session.updated_at = int(time.time())
+                    save_current_generation()
+                    yield f"data: {json.dumps({'type': 'done', 'message_id': existing_assistant.id}, ensure_ascii=False)}\n\n"
+                    return
                 
                 # 记录模型交互
                 log_model_interaction(
@@ -2962,6 +3196,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                     id=assistant_msg_id,
                     parent_id=message_id,
                     role="assistant",
+                    scene_name=session_config.active_scene.name if session_config and session_config.active_scene else None,
                     content=assistant_message,
                     type="text",
                     created_at=assistant_msg_time,
@@ -2969,7 +3204,8 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                     model_info={
                         "id": target['key'],
                         "name": model_to_use,
-                        "provider": source_to_use.name if source_to_use else "unknown"
+                        "provider": source_to_use.name if source_to_use else "unknown",
+                        "reasoning_effort": target['reasoning_effort'],
                     },
                     usage={
                         "prompt_tokens": 0,
@@ -3000,7 +3236,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                 
                 session.updated_at = assistant_msg_time
                 
-                session_storage.save_session(session)
+                save_current_generation()
                 
                 logger.info(f"AI 回复完成并保存，总长度: {len(assistant_message)}")
                 
@@ -3020,6 +3256,12 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                         stage="regenerate"
                     )
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
     
     return StreamingResponse(
         generate(), 
