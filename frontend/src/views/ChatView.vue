@@ -63,6 +63,7 @@
         <MessageList 
           :messages="messages"
           :is-typing="isTyping"
+          :is-generating="isSending || activeCaptureCount > 0 || sceneSwitching"
           :current-session-id="currentSessionId"
           :session-config="currentSession?.session_config"
           :sources="config.sources"
@@ -80,7 +81,7 @@
       <!-- 可拖动的语音按钮 -->
       <VoiceButton
         :is-recording="isRecording"
-        :audio-stream="audioStream"
+        :audio-level="recordingAudioLevel"
         @toggle="handleToggleRecording"
       />
       
@@ -211,7 +212,8 @@ const showSettings = ref(false)
 const showSessionSettings = ref(false)
 const settingsPanelWidth = ref(370)
 const messageListRef = ref(null)
-const audioStream = ref(null)
+const recordingAudioLevel = ref(0)
+watch(isRecording, value => { if (!value) recordingAudioLevel.value = 0 })
 const abortController = ref(null) // 用于取消请求
 const captureConnected = ref(false)
 const captureSourceName = ref('')
@@ -924,11 +926,26 @@ const isProcessingRecording = ref(false)
 let recordingSessionId = null
 // 录音状态轮询定时器
 let recordingStatusInterval = null
+let recordingStatusPending = false
+let captureWarningShown = false
 
 // 检查录音状态（轮询）
 async function checkRecordingStatus() {
+  if (recordingStatusPending || !isRecording.value) return
+  recordingStatusPending = true
   try {
     const status = await api.get('/recording/status')
+    if (!isRecording.value) return
+    recordingAudioLevel.value = status.audio_level || 0
+    if (status.capture_warning && !captureWarningShown) {
+      captureWarningShown = true
+      showNotification(status.capture_warning, 'warning', 6000)
+    }
+    if (status.error) {
+      await handleStopRecording({ sendMessage: false })
+      showNotification(status.error, 'error', 6000)
+      return
+    }
 
     // Soniox returns interim hypotheses during the stream. Reflect the latest
     // hypothesis in the composer while recording; the stop endpoint still
@@ -962,7 +979,10 @@ async function checkRecordingStatus() {
       }
     }
   } catch (error) {
+    recordingAudioLevel.value = 0
     console.error('检查录音状态失败:', error)
+  } finally {
+    recordingStatusPending = false
   }
 }
 
@@ -1071,13 +1091,15 @@ async function handleStartRecording() {
     
     // ✅ 只有在后端成功启动后才设置前端状态
     if (response.success) {
+      captureWarningShown = false
+      recordingAudioLevel.value = 0
       isRecording.value = true
       recordingSessionId = currentSessionId.value  // 记录开始录音时的会话ID
       console.log(`📝 [记录会话] 录音开始于会话: ${recordingSessionId}`)
       showNotification('🎤 正在录音：Alt+E 停止并发送，Esc 停止并保留草稿', 'info', 5000)
       
       // 以较短间隔同步 Soniox 的中间 token（停止接口仍返回最终文本）
-      recordingStatusInterval = setInterval(checkRecordingStatus, 500)
+      recordingStatusInterval = setInterval(checkRecordingStatus, 150)
     } else {
       console.error(`❌ [启动失败] 后端返回失败: ${response.message}`)
       showNotification('启动录音失败: ' + (response.message || '未知错误'), 'error')

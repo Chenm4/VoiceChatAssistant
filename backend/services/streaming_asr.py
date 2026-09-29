@@ -114,6 +114,8 @@ class StreamingASR:
         self.requested_device_name = None
         self.raw_peak = 0
         self.processed_peak = 0
+        self.audio_level = 0.0
+        self.last_audio_at = 0.0
 
         if preload:
             self.logger.info(
@@ -253,6 +255,7 @@ class StreamingASR:
             total_elapsed = (time.time() - start_time) * 1000
             self.logger.error(f"❌ [启动失败] 耗时: {total_elapsed:.2f}ms - {e}", exc_info=True)
             self.error_message = f"启动实时识别失败: {str(e)}"
+            self.is_recording = False
             raise
     
     def _start_audio_capture(self):
@@ -267,14 +270,26 @@ class StreamingASR:
             else:
                 try:
                     device = self.p.get_device_info_by_index(self.input_device_index)
-                except (OSError, ValueError) as exc:
-                    raise ValueError('所选麦克风已不可用，请刷新列表并重新选择') from exc
-                if device['maxInputChannels'] <= 0 or (
+                except (OSError, ValueError):
+                    device = None
+                if device is None or device['maxInputChannels'] <= 0 or (
                     self.requested_device_name and device['name'] != self.requested_device_name
                 ):
-                    raise ValueError('所选麦克风已变更，请刷新列表并重新选择')
+                    # PortAudio indices change after hotplug. Recover only an
+                    # unambiguous name match, never silently use a different mic.
+                    matches = []
+                    if self.requested_device_name:
+                        for index in range(self.p.get_device_count()):
+                            info = self.p.get_device_info_by_index(index)
+                            if info['maxInputChannels'] > 0 and info['name'] == self.requested_device_name:
+                                matches.append(info)
+                    if len(matches) != 1:
+                        raise ValueError('所选麦克风已不可用，请刷新列表并重新选择')
+                    device = matches[0]
             self.input_device_name = device['name']
             self.raw_peak = self.processed_peak = 0
+            self.audio_level = 0.0
+            self.last_audio_at = 0.0
             self.logger.info("🎤 当前输入设备: %s (index=%s)", self.input_device_name, device['index'])
 
             # 打开音频流（真正打开麦克风）
@@ -309,7 +324,13 @@ class StreamingASR:
                         
                         # 读取音频数据
                         data = self.stream.read(self.CHUNK, exception_on_overflow=False)
+                        if not data:
+                            raise OSError('麦克风未返回音频数据')
                         self.raw_peak = max(self.raw_peak, audioop.max(data, 2))
+                        # Short-window RMS, not the lifetime peak: silence must
+                        # bring the UI meter back down after speech ends.
+                        self.audio_level = min(1.0, (audioop.rms(data, 2) / 32768.0) ** 0.5 * 3)
+                        self.last_audio_at = time.monotonic()
                         if noise_suppressor is not None:
                             try:
                                 data = noise_suppressor.process(data)
@@ -340,6 +361,9 @@ class StreamingASR:
                     
                     except Exception as e:
                         self.logger.error(f"❌ [音频捕获错误] {e}")
+                        self.error_message = f'麦克风采集失败: {e}'
+                        self.is_recording = False
+                        self.audio_level = 0.0
                         break
                 
                 # 录音结束，发送剩余数据
@@ -412,6 +436,7 @@ class StreamingASR:
         except Exception as e:
             self.logger.error(f"❌ [发送循环错误] {e}", exc_info=True)
             self.error_message = f"发送音频失败: {str(e)}"
+            self.is_recording = False
     
     def _extract_text(self, payload_msg) -> str:
         """从 v2 协议响应 payload 中提取识别文本（result 可能是 list 或 dict）"""
@@ -441,6 +466,7 @@ class StreamingASR:
                         self.error_message = "未检测到有效语音，请检查麦克风权限和音量（系统设置 → 隐私与安全性 → 麦克风）"
                     else:
                         self.error_message = f"识别错误 (code={response.code})" + (f": {message}" if message else "")
+                    self.is_recording = False
                     break
                 
                 # 服务端按块返回结果：结束块已发送且收到的响应数达到发送块数时，
@@ -482,6 +508,7 @@ class StreamingASR:
         except Exception as e:
             self.logger.error(f"❌ [接收循环错误] {e}", exc_info=True)
             self.error_message = f"接收响应失败: {str(e)}"
+            self.is_recording = False
     
     def _save_wav_file(self) -> str:
         """保存录音为WAV文件"""

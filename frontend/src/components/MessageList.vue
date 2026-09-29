@@ -160,32 +160,7 @@
               <span class="avatar-label">答</span>
             </div>
             <div class="multi-model-messages">
-              <!-- 模型选择按钮组 -->
-              <div class="model-selector-buttons">
-                <div v-for="(modelMsg, modelIndex) in (msg.models || msg.parallel_models || [])" :key="getModelFullName(modelMsg) || modelIndex" class="model-control-group">
-                <button
-                  @click="toggleModelView(index, msg, modelIndex)"
-                  class="model-selector-btn"
-                  :class="{ 
-                    'active': getFocusedModelIndex(index, msg) === modelIndex,
-                    'inactive': getFocusedModelIndex(index, msg) !== undefined && getFocusedModelIndex(index, msg) !== modelIndex
-                  }"
-                >
-                  <el-tag 
-                    size="small" 
-                    effect="plain" 
-                    :type="getModelTagType((modelMsg.model_info?.provider || modelMsg.provider || 'unknown'))"
-                  >
-                    {{ getModelDisplayName(modelMsg) }}
-                  </el-tag>
-                </button>
-                  <div class="reasoning-rerun" v-if="!isSelectionMode">
-                    <select v-model="rerunEfforts[effortKey(index, msg, modelMsg)]" :aria-label="getModelDisplayName(modelMsg) + ' 的思考强度'">
-                      <option v-for="option in reasoningOptions(modelMsg)" :key="option.value" :value="option.value">{{ option.label }}</option>
-                    </select>
-                    <button type="button" :title="'仅重新回答：' + getModelDisplayName(modelMsg)" @click="rerunSelectedModel(index, msg, modelMsg)">重答</button>
-                  </div>
-                </div>
+              <div v-if="getFocusedModelIndex(index, msg) !== undefined" class="model-selector-buttons">
                 <button
                   v-if="getFocusedModelIndex(index, msg) !== undefined"
                   @click="exitFocused(index)"
@@ -221,6 +196,10 @@
                     :class="{ 'fullscreen-card': getFocusedModelIndex(index, msg) === modelIndex }"
                     :style="getModelCardStyle(index, msg)"
                   >
+                    <div class="model-card-header">
+                      <button type="button" class="model-name-button" title="切换聚焦显示" @click="toggleModelView(index, msg, modelIndex)">{{ getModelDisplayName(modelMsg) }}</button>
+                      <ReasoningButtons v-if="!isSelectionMode" :options="reasoningOptions(modelMsg)" :value="defaultEffortForModel(modelMsg)" :disabled="isGenerating" :label="getModelDisplayName(modelMsg) + ' 的思考强度'" @change="rerunSelectedModel(index, msg, modelMsg, $event)" />
+                    </div>
                     <!-- 消息内容 -->
                     <div class="bubble-content">
                       <div class="message-text">
@@ -286,13 +265,7 @@
                   <el-tag size="small" effect="plain" :type="getModelTagType(msg.model_info.provider)">
                     {{ msg.model_info.provider && msg.model_info.provider !== 'unknown' ? `${msg.model_info.provider} · ` : '' }}{{ msg.model_info.name }}
                   </el-tag>
-                  <span class="reasoning-rerun" v-if="!isSelectionMode">
-                    <span>思考强度</span>
-                    <select v-model="rerunEfforts[effortKey(index, msg, msg)]" aria-label="本次重新回答的思考强度">
-                      <option v-for="option in reasoningOptions(msg)" :key="option.value" :value="option.value">{{ option.label }}</option>
-                    </select>
-                    <button type="button" @click="rerunSelectedModel(index, msg)">重新回答</button>
-                  </span>
+                  <ReasoningButtons v-if="!isSelectionMode" :options="reasoningOptions(msg)" :value="defaultEffortForModel(msg)" :disabled="isGenerating" :label="getModelDisplayName(msg) + ' 的思考强度'" @change="rerunSelectedModel(index, msg, msg, $event)" />
                 </div>
                 
                 <!-- 编辑模式 -->
@@ -373,6 +346,7 @@ import { AudioLines, MessageSquare, Mic, ScanLine } from 'lucide-vue-next'
 import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import AnswerVersions from './AnswerVersions.vue'
+import ReasoningButtons from './ReasoningButtons.vue'
 import { renderMarkdown } from '../utils/markdown'
 import { blobToDataUrl, copyRichContent } from '../utils/clipboard'
 
@@ -385,6 +359,7 @@ const props = defineProps({
     type: Boolean,
     default: false
   },
+  isGenerating: { type: Boolean, default: false },
   currentSessionId: {
     type: String,
     default: null
@@ -403,7 +378,6 @@ const props = defineProps({
 
 const emit = defineEmits(['message-updated', 'message-deleted', 'messages-deleted', 'regenerate', 'capture-edit-image'])
 
-const rerunEfforts = ref({})
 const REASONING_OPTIONS = [
   { value: 'none', label: '无' },
   { value: 'minimal', label: '极低' },
@@ -445,7 +419,8 @@ function defaultEffortForModel(modelMessage) {
   return allowed.some(option => option.value === configured) ? configured : allowed[0].value
 }
 
-function rerunSelectedModel(index, message, targetModel = null) {
+function rerunSelectedModel(index, message, targetModel = null, effort) {
+  if (props.isGenerating) return
   const modelMessage = targetModel || (message.model_info ? message : selectedModel(index, message))
   const model = getModelFullName(modelMessage)
   const parent = props.messages.find(item => item.id === message.parent_id)
@@ -455,7 +430,7 @@ function rerunSelectedModel(index, message, targetModel = null) {
     return
   }
   const allowed = reasoningOptions(modelMessage)
-  const effort = rerunEfforts.value[effortKey(index, message, modelMessage)]
+  if (!allowed.some(option => option.value === effort) || effort === defaultEffortForModel(modelMessage)) return
   emit('regenerate', {
     messageId: parent.id,
     newContent: parent.content,
@@ -464,22 +439,6 @@ function rerunSelectedModel(index, message, targetModel = null) {
     targeted: true
   })
 }
-
-function effortKey(index, message, modelMessage) {
-  return `${props.currentSessionId}:${message.id || index}:${getModelFullName(modelMessage)}`
-}
-watch([() => props.messages.map(message => [message.id, message.role, message.model_info?.reasoning_effort, ...getMessageModels(message).map(model => `${getModelFullName(model)}:${model.model_info?.reasoning_effort || ''}`)]), () => props.sessionConfig], () => {
-  const next = {}
-  props.messages.forEach((message, index) => {
-    if (message.role !== 'assistant') return
-    const models = message.model_info ? [message] : getMessageModels(message)
-    models.forEach(model => {
-      const key = effortKey(index, message, model)
-      next[key] = rerunEfforts.value[key] ?? defaultEffortForModel(model)
-    })
-  })
-  rerunEfforts.value = next
-}, { immediate: true })
 
 function attachmentUrl(attachment) {
   if (!props.currentSessionId || !attachment?.id) return ''
@@ -1440,19 +1399,10 @@ defineExpose({
   cursor: pointer;
   font-size: 13px;
 }
-.model-control-group { display:inline-flex; align-items:center; gap:5px; flex-wrap:wrap; padding:3px; border:1px solid #e2e8f0; border-radius:10px; }
-.reasoning-rerun { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; }
-.reasoning-rerun select, .reasoning-rerun button {
-  border: 1px solid #dbe2ef;
-  border-radius: 8px;
-  padding: 4px 7px;
-  background: #fff;
-  color: #475569;
-  font-size: 12px;
-  cursor: pointer;
-}
-.reasoning-rerun button { color: #2563eb; }
-.reasoning-rerun button:hover { background: #eff6ff; }
+.model-card-header { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 4px 20px 12px; border-bottom: 1px solid #ededed; margin-bottom: 6px; }
+.model-name-button { max-width: 100%; border: 0; padding: 0; background: transparent; color: #626262; font-size: 12px; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+.model-name-button:hover { color: #2563eb; }
+.model-name-button:focus-visible { outline: 2px solid #93c5fd; outline-offset: 3px; }
 
 .message-attachment-link {
   display: block;
@@ -1504,8 +1454,9 @@ defineExpose({
 .model-badge {
   margin: 0 0 6px 2px;
   display: flex;
-  align-items: center;
-  gap: 4px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
 }
 
 /* 多模型并行容器 - 横向布局 */

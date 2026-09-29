@@ -1182,11 +1182,27 @@ async def get_recording_status():
             "is_recording": False,
             "auto_stopped": False,
             "partial_text": "",
+            "audio_level": 0.0,
+            "input_device_name": "",
+            "error": None,
         }
     
     return {
         "is_recording": streaming_asr.is_recording,
         "auto_stopped": streaming_asr.auto_stopped,
+        "audio_level": (
+            streaming_asr.audio_level
+            if streaming_asr.is_recording and time.monotonic() - streaming_asr.last_audio_at < 0.5
+            else 0.0
+        ),
+        "input_device_name": streaming_asr.input_device_name,
+        "error": streaming_asr.error_message,
+        "capture_warning": (
+            f'麦克风「{streaming_asr.input_device_name}」尚未采集到声音，请检查设备、静音和麦克风权限'
+            if streaming_asr.is_recording and streaming_asr.recording_start_time
+            and time.time() - streaming_asr.recording_start_time > 4
+            and streaming_asr.raw_peak == 0 else None
+        ),
         # Soniox emits hypotheses while audio is still being sent. Expose
         # the latest one so the UI can render the live transcript.
         "partial_text": (

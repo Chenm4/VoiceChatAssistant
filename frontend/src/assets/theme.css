@@ -102,8 +102,8 @@ body .el-overlay { background: #2f2f2f40; backdrop-filter: blur(4px); }
 #app .voice-button { background: #e8e8e8; border: 1px solid #d7d7d7; box-shadow: 0 4px 18px #4747470c; z-index: 30; }
 #app .voice-button .icon { color: #6b6b6b; }
 #app .voice-button:hover { background: #dfdfdf; border-color: #cbcbcb; box-shadow: 0 5px 20px #47474712; }
-#app .voice-button.recording, #app .voice-button.recording:hover { background: #f5e1d9; border-color: #dca99c; box-shadow: 0 0 0 6px #f8ede8; }
-#app .voice-button.recording .icon { color: #a55f53; }
+#app .voice-button.recording, #app .voice-button.recording:hover { background: #f0fdf4; border-color: #86efac; box-shadow: 0 0 0 calc(2px + var(--volume, 0) * 5px) #22c55e20; }
+#app .voice-button.recording .icon { color: #15803d; }
 /* Comfortable editorial typography and light conversation surfaces. */
 #app .chat-container { background: var(--paper); padding: 28px 36px 90px; max-width: 1192px; }
 #app .message { margin-bottom: 28px; }

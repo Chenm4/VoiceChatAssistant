@@ -43,6 +43,7 @@ class MicrophoneCaptureTests(unittest.IsolatedAsyncioTestCase):
         asr.input_device_index = 2
         asr.requested_device_name = 'Selected mic'
         device = Mock()
+        device.get_device_count.return_value = 0
         device.get_device_info_by_index.return_value = {'name': 'Other mic', 'index': 2, 'maxInputChannels': 1}
         with patch('backend.services.streaming_asr.pyaudio.PyAudio', return_value=device), \
              patch('backend.services.streaming_asr.create_noise_suppressor', return_value=None):
@@ -58,11 +59,14 @@ class MicrophoneCaptureTests(unittest.IsolatedAsyncioTestCase):
         asr = await self.capture(b'\x34\x12' * 960)
         self.assertEqual(asr.raw_peak, 0x1234)
         self.assertEqual(asr.processed_peak, 0x1234)
+        self.assertGreater(asr.audio_level, 0)
+        self.assertLessEqual(asr.audio_level, 1)
         asr.stream.close()
         asr.p.terminate()
 
     async def test_silence_is_reported_as_capture_failure(self):
         asr = await self.capture(b'\0\0' * 960)
+        self.assertEqual(asr.audio_level, 0)
         while not asr.audio_queue.empty():
             asr.audio_queue.get_nowait()
         asr.error_message = '未检测到有效语音内容'
