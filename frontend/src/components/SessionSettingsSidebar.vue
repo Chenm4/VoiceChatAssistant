@@ -989,6 +989,7 @@ async function handleSave() {
       screenshot_prompt: screenshotPrompt.value.trim(),
       display_font_size: Number(displayFontSize.value),
       display_line_height: Number(displayLineHeight.value),
+      answer_highlight_enabled: props.session.session_config?.answer_highlight_enabled ?? false,
       system_prompt: systemPrompt.value || null,
       prompt_template_id: promptTemplateId.value || null,
       prompt_template_version: promptTemplateId.value ? promptTemplateVersion.value : null,

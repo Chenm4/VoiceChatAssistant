@@ -16,6 +16,22 @@ BACKGROUND_FILE = PROJECT_ROOT / "prompt_lab" / "background.json"
 DEFAULT_SESSION_PROMPT_ID = "spoken_keypoints"
 
 
+ANSWER_HIGHLIGHT_PROMPT = """【答题高亮输出协议】
+先完成分析并核对答案，再在回答的最后追加且仅追加一个 ```json 代码块，代码块后不要输出其他内容。
+JSON 格式为 {"answer_highlight":{"answers":[{"question":"1","type":"choice","answer":"A"}]}}。
+仅对当前问题中的选择题和判断题输出条目。选择题 type 为 choice，answer 为大写选项字母，多选如 AC；判断题 type 为 boolean，answer 为 对 或 错。
+question 必须提取当前题目原有编号（例如题号 12 输出 "12"），前端会将其以选项字母三分之一的大小显示在选项下方；没有明确题号时使用空字符串，禁止自行编号。多题按题目顺序列出多个条目。
+每个模型独立输出自己核对后的答案；模型来源和左右位置由前端按并行回答卡片顺序标注，不要在 JSON 中混入其他模型的答案。
+非选择/判断题，或题干/选项不完整、无法确定答案时，answers 输出空数组，不要猜测。
+JSON 必须有效，不含注释；最终答案须与正文结论一致。不要在分析开头输出这个 JSON。"""
+
+
+def _with_answer_highlight(rules: Optional[str], config: Optional[SessionConfig]) -> Optional[str]:
+    if config and config.answer_highlight_enabled:
+        return "\n\n".join(part for part in (rules, ANSWER_HIGHLIGHT_PROMPT) if part)
+    return rules
+
+
 def _read_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -91,7 +107,7 @@ def compose_session_system_prompt(session: Session) -> Optional[str]:
     if config and config.active_scene:
         # Scene instructions belong only to the current user request, never history.
         rules = config.system_prompt if config.system_prompt is not None else session.system_prompt or config.scene_common_rules
-        return rules.strip() or None
+        return _with_answer_highlight(rules.strip() or None, config)
     if config is not None and config.system_prompt is not None:
         rules = config.system_prompt
     else:
@@ -114,7 +130,7 @@ def compose_session_system_prompt(session: Session) -> Optional[str]:
             + "\n\n涉及个人经历或项目的问题只能依据以上资料回答；"
             "资料没有提供的细节不要猜测或编造。"
         )
-    return "\n\n".join(parts) or None
+    return _with_answer_highlight("\n\n".join(parts) or None, config)
 
 
 def render_session_user_prompt(session: Session, question: str) -> str:

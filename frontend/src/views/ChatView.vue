@@ -43,7 +43,14 @@
       >
         <template #scenes>
           <SceneBar :session="currentSession" :disabled="isCapturing"
-            @selected="handleSceneSelected" />
+            @selected="handleSceneSelected">
+            <label class="answer-toggle" title="在回答末尾输出 JSON，并显示选择题/判断题答案">
+              <input type="checkbox" :checked="currentSession?.session_config?.answer_highlight_enabled"
+                :disabled="!currentSessionId || answerToggleBusy || isSending || activeCaptureCount > 0 || sceneSwitching"
+                @change="toggleAnswerHighlight($event.target.checked)" />答案高亮
+            </label>
+            <span id="answer-highlight-controls" class="answer-highlight-controls"></span>
+          </SceneBar>
         </template>
         <template #microphone>
           <MicrophoneSelect :disabled="isRecording || isProcessingRecording" @change="selectedMicrophone = $event" />
@@ -76,6 +83,8 @@
           @regenerate="handleRegenerateMessage"
           @capture-edit-image="handleCaptureForEdit"
         />
+        <AnswerHighlight v-if="currentSession?.session_config?.answer_highlight_enabled"
+          :key="currentSessionId" :messages="messages" />
       </div>
       
       <!-- 可拖动的语音按钮 -->
@@ -114,6 +123,7 @@ import MessageList from '../components/MessageList.vue'
 import InputArea from '../components/InputArea.vue'
 import MicrophoneSelect from '../components/MicrophoneSelect.vue'
 import SceneBar from '../components/SceneBar.vue'
+import AnswerHighlight from '../components/AnswerHighlight.vue'
 import CaptureButton from '../components/CaptureButton.vue'
 import VoiceButton from '../components/VoiceButton.vue'
 import SettingsModal from '../components/SettingsModal.vue'
@@ -126,6 +136,23 @@ import { DisplayScreenCapture } from '../utils/screenCapture'
 
 defineEmits(['open-prompt-lab'])
 
+const answerToggleBusy = ref(false)
+async function toggleAnswerHighlight(enabled) {
+  const session = currentSession.value
+  if (!session || answerToggleBusy.value) return
+  answerToggleBusy.value = true
+  try {
+    const result = await api.put(`/sessions/${session.id}/config`, {
+      ...session.session_config, answer_highlight_enabled: enabled
+    })
+    if (result.config?.answer_highlight_enabled !== enabled) {
+      throw new Error('后端未加载答案高亮功能，请重启后端服务')
+    }
+    session.session_config = result.config
+  } catch (error) {
+    ElMessage.error('答案高亮设置失败：' + (error.response?.data?.detail || error.message))
+  } finally { answerToggleBusy.value = false }
+}
 const sceneSwitching = ref(false)
 const captureControllers = new Set()
 let pendingSceneChange = null
@@ -1935,4 +1962,9 @@ onUnmounted(() => {
     transform: translateY(-10px);
   }
 }
+</style>
+
+<style scoped>
+.answer-highlight-controls { display: inline-flex; align-items: center; }
+.answer-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; white-space: nowrap; }
 </style>

@@ -125,6 +125,7 @@ class SessionConfig(BaseModel):
     model_config = {"protected_namespaces": ()}
     active_scene: Optional[PromptScene] = None
     scene_common_rules: str = ""
+    answer_highlight_enabled: bool = False
     source_name: Optional[str] = None
     models: List[str] = Field(default_factory=list)
     # New format: supports selecting models from multiple API sources.

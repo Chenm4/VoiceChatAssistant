@@ -113,6 +113,21 @@ class SessionPromptTests(unittest.TestCase):
             "原始问题",
         )
 
+class AnswerHighlightPromptTests(unittest.TestCase):
+    def test_opt_in_preserves_original_rules_and_background(self):
+        config = SessionConfig(system_prompt='原规则', background_mode='custom', background_context='背景')
+        session = make_session(config)
+        original = session_prompt.compose_session_system_prompt(session)
+        self.assertNotIn('answer_highlight', original)
+        config.answer_highlight_enabled = True
+        self.assertEqual(session_prompt.compose_session_system_prompt(session), original + '\n\n' + session_prompt.ANSWER_HIGHLIGHT_PROMPT)
+
+    def test_scene_also_appends_protocol(self):
+        from backend.api.models import PromptScene
+        config = SessionConfig(system_prompt='规则', answer_highlight_enabled=True,
+                               active_scene=PromptScene(id='test', name='测试'))
+        self.assertTrue(session_prompt.compose_session_system_prompt(make_session(config)).endswith(session_prompt.ANSWER_HIGHLIGHT_PROMPT))
+
 
 if __name__ == "__main__":
     unittest.main()
