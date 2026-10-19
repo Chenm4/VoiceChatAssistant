@@ -439,13 +439,7 @@ class StreamingASR:
                         other_data = (other_data or b'')[:len(data)].ljust(len(data), b'\0')
                         self.raw_peak = max(self.raw_peak, audioop.max(other_data, 2))
                         data = mix_pcm16(data, other_data)
-                    self.audio_level = level_meter.update(data)
-                    self.processed_peak = max(self.processed_peak, audioop.max(data, 2))
-                    self.audio_buffer.append(data)
-                    self._pending_audio += data
-                    while len(self._pending_audio) >= self.bytes_per_segment:
-                        segment, self._pending_audio = self._pending_audio[:self.bytes_per_segment], self._pending_audio[self.bytes_per_segment:]
-                        asyncio.run_coroutine_threadsafe(self.audio_queue.put(segment), self.loop)
+                    self._append_pcm(data, level_meter)
             except Exception as error:
                 if not self.is_recording:
                     break
@@ -458,6 +452,16 @@ class StreamingASR:
                 break
         if not self.is_recording and device_index == self._active_device_index:
             self._finish_capture()
+
+    def _append_pcm(self, data, level_meter):
+        self.last_audio_at = time.monotonic()
+        self.audio_level = level_meter.update(data)
+        self.processed_peak = max(self.processed_peak, audioop.max(data, 2))
+        self.audio_buffer.append(data)
+        self._pending_audio += data
+        while len(self._pending_audio) >= self.bytes_per_segment:
+            segment, self._pending_audio = self._pending_audio[:self.bytes_per_segment], self._pending_audio[self.bytes_per_segment:]
+            asyncio.run_coroutine_threadsafe(self.audio_queue.put(segment), self.loop)
 
     def _finish_capture(self):
         """Queue the final short block and exactly one EOF, even after device failure.

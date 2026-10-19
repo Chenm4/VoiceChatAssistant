@@ -27,6 +27,7 @@ import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import ChatView from './views/ChatView.vue'
 import PromptLabView from './views/PromptLabView.vue'
 import { setUsername, authFetch, announceAuthChange, migrateLegacyPreferences } from './utils/auth'
+import { apiUrl } from './utils/apiUrl.js'
 
 const currentView = ref('chat')
 const user = ref(null)
@@ -36,7 +37,7 @@ const error = ref('')
 const form = reactive({ username: '', password: '' })
 async function checkLogin() {
   try {
-    const response = await fetch('/api/auth/me', { cache: 'no-store' })
+    const response = await fetch(apiUrl('/api/auth/me'), { cache: 'no-store' })
     if (response.ok) {
       const identity = await response.json()
       setUsername(identity.username)
@@ -50,7 +51,7 @@ async function login() {
   busy.value = true
   error.value = ''
   try {
-    const response = await fetch('/api/auth/login', {
+    const response = await fetch(apiUrl('/api/auth/login'), {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(form)
     })
     const result = await response.json()

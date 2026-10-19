@@ -16,7 +16,7 @@
 import { userStorage } from '../utils/auth'
 
 import { computed, onMounted, ref } from 'vue'
-import api from '../utils/api'
+import { browserRecordingDevices } from '../utils/browserRecording'
 import { preferredRecordingDevice } from '../utils/recordingDevices'
 
 const props = defineProps({ disabled: Boolean, label: { type: String, default: '麦克风' },
@@ -42,7 +42,7 @@ async function loadDevices() {
   loading.value = true
   error.value = ''
   try {
-    const result = await api.get('/recording/devices')
+    const result = await browserRecordingDevices()
     devices.value = result.devices
     defaultIndex.value = result.default_index
     let saved = null

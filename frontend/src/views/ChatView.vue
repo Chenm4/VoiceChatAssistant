@@ -204,6 +204,7 @@ import SettingsModal from '../components/SettingsModal.vue'
 import SessionSidebar from '../components/SessionSidebar.vue'
 import SessionSettingsSidebar from '../components/SessionSettingsSidebar.vue'
 import api from '../utils/api'
+import { BrowserRecording, browserRecordingDevices } from '../utils/browserRecording'
 import { createEscapeGesture } from '../utils/escapeGesture'
 import { installMicrophoneContextMenu } from '../utils/microphoneContextMenu'
 import { interruptAnswerStreams } from '../utils/interruptAnswerStreams'
@@ -214,7 +215,8 @@ import { DisplayScreenCapture } from '../utils/screenCapture'
 import { CameraCapture } from '../utils/cameraCapture'
 
 defineEmits(['open-prompt-lab'])
-const showDoubao = ref(true), doubaoOverlay = ref(null)
+const showDoubao = ref(false), doubaoOverlay = ref(null)
+let browserRecording = null
 let recordingWithDoubao = false
 
 const captureButtonSize = ref(64)
@@ -400,7 +402,7 @@ function clearComposerOnly() {
 }
 async function initializeRecordingInputs() {
   try {
-    const { devices, default_index } = await api.get('/recording/devices')
+    const { devices, default_index } = await browserRecordingDevices()
     defaultRecordingDevice.value = devices.find(device => device.index === default_index) || null
     const saved = key => { try { return JSON.parse(userStorage.getItem(key) || 'null') } catch { return null } }
     selectedMicrophone.value = preferredRecordingDevice(devices, saved('recordingMicrophone'), 'microphone')
@@ -1289,6 +1291,8 @@ async function checkRecordingStatus() {
     // 如果后端不在录音但前端显示在录音（异常情况）
     if (!status.is_recording && isRecording.value && !status.auto_stopped) {
       console.warn('⚠️ [状态不同步] 后端未录音但前端显示录音中，修正状态')
+      void browserRecording?.dispose()
+      browserRecording = null
       isRecording.value = false
       if (recordingStatusInterval) {
         clearInterval(recordingStatusInterval)
@@ -1330,8 +1334,11 @@ async function handleStopRecording({ sendMessage = true, silent = false } = {}) 
     console.log(`📡 [发送请求:${new Date(Date.now()).toLocaleTimeString()}.${Date.now() % 1000}] 向后端发送 /recording/stop 请求...`)
     const apiStartTime = Date.now()
     
-    const data = await api.post(sendMessage ? '/recording/stop' : '/recording/stop?finalize=false', null,
-      { timeout: sendMessage ? 60000 : 10000 })
+    const capture = browserRecording
+    browserRecording = null
+    const data = capture ? await capture.stop(sendMessage)
+      : await api.post(sendMessage ? '/recording/stop' : '/recording/stop?finalize=false', null,
+        { timeout: sendMessage ? 60000 : 10000 })
     void loadSessions()
     
     const apiEndTime = Date.now()
@@ -1412,9 +1419,9 @@ async function handleStartRecording(source = 'microphone') {
     recordingDraftPrefix = inputMessage.value.trim()
     latestRecordingTranscript = ''
     clearedTranscriptLength = 0
-    const response = await api.post('/recording/start', {
-      ...route
-    })
+    browserRecording = new BrowserRecording(error => showNotification(error.message, 'error'))
+    const response = await browserRecording.start(route)
+    void initializeRecordingInputs()
     
     const apiEndTime = Date.now()
     const apiDuration = apiEndTime - apiStartTime
@@ -1460,7 +1467,7 @@ async function handleToggleRecording(source = (isRecording.value ? recordingInpu
       recordingPhase.value = 'switching'
       const route = routeForRecording(source)
       try {
-        const response = await api.post('/recording/switch-input', route)
+        const response = await browserRecording.switchInput(route)
         if (!response.success) throw new Error(response.message || '切换输入设备失败')
       } catch (error) {
         if (error.response?.status !== 409) throw error
@@ -2188,8 +2195,7 @@ function handleVisibilityChange() {
 function handleBeforeUnload(event) {
   if (isRecording.value) {
     console.log('⚠️ [页面卸载] 检测到页面即将卸载，停止录音')
-    // 发送停止请求（使用 sendBeacon 确保在页面卸载时也能发送）
-    authFetch('/api/recording/stop', { method: 'POST', keepalive: true }).catch(() => {})
+    void browserRecording?.dispose()
     isRecording.value = false
     // 显示确认对话框（某些浏览器会显示）
     event.preventDefault()
@@ -2248,6 +2254,7 @@ onMounted(async () => {
 
 // 组件卸载时移除事件监听
 onUnmounted(() => {
+  if (!isRecording.value) void browserRecording?.dispose()
   escapeGesture.reset()
   window.removeEventListener('keydown', handleKeyDown)
   document.removeEventListener('visibilitychange', handleVisibilityChange)

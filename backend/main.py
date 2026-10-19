@@ -18,11 +18,14 @@ from backend.auth.session import AuthenticationMiddleware, router as auth_router
 from backend.api.routes import router
 from prompt_lab.router import router as prompt_lab_router
 from backend.api.doubao_realtime import router as doubao_realtime_router
+from backend.api.browser_recording import router as browser_recording_router
+from backend.api.voice_settings import router as voice_settings_router
 from backend.utils.logger import get_app_logger
 
 # 初始化日志
 logger = get_app_logger()
 FRONTEND_PORT = os.getenv("FRONTEND_PORT", "5188")
+BACKEND_PORT = os.getenv("BACKEND_PORT", "8888")
 FRONTEND_ORIGINS = [
     f"http://localhost:{FRONTEND_PORT}",
     f"http://127.0.0.1:{FRONTEND_PORT}",
@@ -59,6 +62,8 @@ app.include_router(auth_router, prefix="/api")
 app.include_router(router, prefix="/api")
 app.include_router(prompt_lab_router, prefix="/api")
 app.include_router(doubao_realtime_router, prefix="/api")
+app.include_router(browser_recording_router, prefix="/api")
+app.include_router(voice_settings_router, prefix="/api")
 
 
 @app.on_event("startup")
@@ -68,10 +73,10 @@ async def startup_event():
     logger.info("="*60)
     logger.info("🚀 ChatGPT Web 应用启动")
     logger.info("="*60)
-    logger.info("📡 API 端点: http://localhost:8888/api")
+    logger.info(f"📡 API 端点: http://localhost:{BACKEND_PORT}/api")
     logger.info(f"📱 前端开发地址: http://localhost:{FRONTEND_PORT}")
-    logger.info("📚 API 文档: http://localhost:8888/docs")
-    logger.info("📖 ReDoc: http://localhost:8888/redoc")
+    logger.info(f"📚 API 文档: http://localhost:{BACKEND_PORT}/docs")
+    logger.info(f"📖 ReDoc: http://localhost:{BACKEND_PORT}/redoc")
     logger.info("="*60)
 
 
@@ -102,7 +107,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "backend.main:app",
         host="0.0.0.0",
-        port=8888,
+        port=int(BACKEND_PORT),
         reload=True,  # 开发模式下自动重载
         log_level="info"
     )

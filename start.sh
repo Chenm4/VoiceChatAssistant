@@ -1,6 +1,7 @@
 #!/bin/bash
 
 FRONTEND_PORT=${FRONTEND_PORT:-5188}
+BACKEND_PORT=${BACKEND_PORT:-8888}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 BACKEND_PID=""
 FRONTEND_PID=""
@@ -96,7 +97,7 @@ if ! command -v lsof >/dev/null 2>&1; then
     exit 1
 fi
 
-stop_port_listener 8888
+stop_port_listener "$BACKEND_PORT"
 stop_port_listener "$FRONTEND_PORT"
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -118,12 +119,12 @@ fi
 
 # 启动后端
 echo "📡 启动后端服务..."
-$PYTHON_BIN -m uvicorn backend.main:app --host 0.0.0.0 --port 8888 &
+$PYTHON_BIN -m uvicorn backend.main:app --host 0.0.0.0 --port "$BACKEND_PORT" &
 BACKEND_PID=$!
 
 # 等待后端启动
 echo "⏳ 等待后端启动..."
-wait_for_service "$BACKEND_PID" "http://127.0.0.1:8888/health" "后端" || exit 1
+wait_for_service "$BACKEND_PID" "http://127.0.0.1:$BACKEND_PORT/health" "后端" || exit 1
 
 echo "✅ 后端启动成功"
 echo ""
@@ -150,8 +151,8 @@ echo "✅ 应用启动成功！"
 echo "================================"
 echo ""
 echo "📱 前端地址: $FRONTEND_SCHEME://localhost:$FRONTEND_PORT"
-echo "📡 后端地址: http://localhost:8888"
-echo "📚 API 文档: http://localhost:8888/docs"
+echo "📡 后端地址: http://localhost:$BACKEND_PORT"
+echo "📚 API 文档: http://localhost:$BACKEND_PORT/docs"
 echo ""
 echo "按 Ctrl+C 停止所有服务"
 echo ""

@@ -4,6 +4,7 @@ import { fileURLToPath, URL } from 'node:url'
 import fs from 'node:fs'
 
 const FRONTEND_PORT = Number(process.env.FRONTEND_PORT || 5188)
+const BACKEND_PORT = Number(process.env.BACKEND_PORT || 8888)
 const HTTPS_CERT = process.env.FRONTEND_HTTPS_CERT
 const HTTPS_KEY = process.env.FRONTEND_HTTPS_KEY
 
@@ -33,7 +34,7 @@ export default defineConfig({
     https,
     proxy: {
       '/api': {
-        target: 'http://localhost:8888',
+        target: `http://127.0.0.1:${BACKEND_PORT}`,
         changeOrigin: false,
         ws: true
       }

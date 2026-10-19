@@ -1,3 +1,5 @@
+import { apiUrl } from './apiUrl.js'
+
 // Identity is held by the mounted page. A stale tab never silently becomes another user.
 let username = ''
 export const currentUsername = () => username
@@ -6,13 +8,13 @@ export function authHeaders() { return username ? { 'X-Workspace-User': username
 export function privateUrl(value) {
   const url = new URL(value, window.location.origin)
   if (username) url.searchParams.set('workspace_user', username)
-  return url.pathname + url.search
+  return apiUrl(url.pathname + url.search)
 }
 export function sessionExpired() { window.dispatchEvent(new Event('auth-expired')) }
 export async function authFetch(url, options = {}) {
   const headers = new Headers(options.headers)
   for (const [key, value] of Object.entries(authHeaders())) headers.set(key, value)
-  const response = await fetch(url, { ...options, headers, credentials: 'same-origin' })
+  const response = await fetch(apiUrl(url), { ...options, headers, credentials: 'same-origin' })
   if (response.status === 401) sessionExpired()
   return response
 }

@@ -1,4 +1,5 @@
 import { currentUsername } from './auth.js'
+import { apiUrl } from './apiUrl.js'
 /** Text output for explicitly submitted typed questions or completed recordings. */
 export class DoubaoRealtime {
   constructor(onMessage, onClose) {
@@ -7,7 +8,7 @@ export class DoubaoRealtime {
     this.closed = false
   }
   start(options) {
-    const url = new URL('/api/doubao-realtime/ws', window.location.href)
+    const url = new URL(apiUrl('/api/doubao-realtime/ws'), window.location.href)
     url.searchParams.set('workspace_user', currentUsername())
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
     this.socket = new WebSocket(url)

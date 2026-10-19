@@ -98,12 +98,7 @@
             <div v-if="editingIndex === index" class="space-y-3">
               <div>
                 <label class="block text-xs font-medium text-gray-600 mb-1">API Key</label>
-                <input 
-                  type="password" 
-                  v-model="source.api_key"
-                  placeholder="sk-..."
-                  class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
+                <SecretField v-model="source.api_key" :label="source.name + ' API Key'" />
               </div>
               
               <div>
@@ -170,12 +165,7 @@
           </div>
           <div>
             <label class="block text-xs font-medium text-gray-600 mb-1">API Key</label>
-            <input 
-              type="password" 
-              v-model="newSource.api_key"
-              placeholder="sk-..."
-              class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
+            <SecretField v-model="newSource.api_key" label="新配置源 API Key" />
           </div>
           <div>
             <label class="block text-xs font-medium text-gray-600 mb-1">Base URL</label>
@@ -204,6 +194,7 @@
         </div>
       </div>
       
+      <VoiceSettings />
       <div class="mt-6">
         <button 
           @click="$emit('close')" 
@@ -220,6 +211,8 @@
 import { ref, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../utils/api'
+import SecretField from './SecretField.vue'
+import VoiceSettings from './VoiceSettings.vue'
 
 const props = defineProps({
   config: {

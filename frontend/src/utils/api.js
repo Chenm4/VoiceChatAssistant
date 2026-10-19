@@ -3,10 +3,11 @@
  */
 
 import axios from 'axios'
+import { apiUrl } from './apiUrl.js'
 import { authHeaders, sessionExpired } from './auth.js'
 
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: apiUrl('/api'),
   timeout: 60000,
   headers: {
     'Content-Type': 'application/json'
