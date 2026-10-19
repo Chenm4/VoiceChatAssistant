@@ -7,6 +7,7 @@
 """
 
 import os
+from backend.services.provider_secrets import load_xiaomi_key
 
 
 def _env_int(name, default, minimum=1, maximum=100):
@@ -28,6 +29,12 @@ def _env_bool(name, default=False):
 # ==================== OpenAI 兼容 API 配置（多配置源） ====================
 OPENAI_CONFIG = [
     {
+        "name": "小米 MiMo",
+        "api_key": load_xiaomi_key(),
+        "models": ["mimo-v2.6-pro-ultraspeed", "mimo-v2.6-pro", "mimo-v2.6-flash", "mimo-v2.5-pro", "mimo-v2.5"],
+        "base_url": "https://api.xiaomimimo.com/v1"
+    },
+    {
         "name": "OpenAI",
         "api_key": "",  # 填写您的 OpenAI API Key
         "models": ["gpt-4", "gpt-3.5-turbo"],
@@ -41,7 +48,7 @@ OPENAI_CONFIG = [
     },
     {
         "name": "通义千问",
-        "api_key": "sk-67a4cb1f90b34023a0340a7957fec3bd",
+        "api_key": os.getenv("DASHSCOPE_API_KEY", ""),
         "models": ["qwen3.8-max", "qwen3.7-plus", "qwen3.8-flash"],
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
     },
@@ -54,7 +61,7 @@ OPENAI_CONFIG = [
     {
         "name": "openrouter",
         "api_key": os.getenv("OPENROUTER_API_KEY", ""),
-        "models": ["~openai/gpt-sol-latest", "~openai/gpt-terra-latest"],
+        "models": ["~openai/gpt-sol-latest", "~openai/gpt-terra-latest", "anthropic/claude-sonnet-5.5", "openai/gpt-6-astra"],
         "base_url": "https://openrouter.ai/api/v1"
     }
 ]

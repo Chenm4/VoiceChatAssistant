@@ -124,7 +124,10 @@ class ScreenshotChatTests(unittest.TestCase):
         provider_target = {"key": "test::model-a", "model": "model-a", "source_name": "test", "source": source, "reasoning_effort": "low"}
         chunk = SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="new a"))])
         completion = Mock()
-        completion.chat.completions.create.return_value = iter([chunk])
+        completion.chat.completions.create.return_value = iter([
+            SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=None, reasoning_content='thinking'))]),
+            chunk,
+        ])
 
         async def run():
             response = await routes.regenerate_message(
@@ -143,6 +146,11 @@ class ScreenshotChatTests(unittest.TestCase):
             chunks = asyncio.run(run())
 
         self.assertTrue(any('"type": "done"' in part for part in chunks))
+        types = [__import__('json').loads(part.removeprefix('data: ').strip())['type'] for part in chunks]
+        self.assertLess(types.index('targeted_start'), types.index('reasoning'))
+        self.assertLess(types.index('reasoning'), types.index('content'))
+        self.assertLess(types.index('content'), types.index('done'))
+        self.assertEqual(answer.parallel_models[0]['reasoning_content'], 'thinking')
         self.assertEqual(len(session.messages), 2)
         self.assertEqual(question.children_ids, ["answer"])
         self.assertEqual(answer.parallel_models[0]["content"], "new a")
@@ -174,6 +182,11 @@ class ScreenshotChatTests(unittest.TestCase):
         async def run():
             first = await routes.chat(ChatRequest(message="first", session_id=session.id))
             second = await routes.chat(ChatRequest(message="second", session_id=session.id))
+            # Persisted question IDs are available before consuming any model tokens.
+            questions = stored[session.id].messages
+            self.assertEqual(first.headers['X-User-Message-Id'], questions[0].id)
+            self.assertEqual(second.headers['X-User-Message-Id'], questions[1].id)
+            completion.chat.completions.create.assert_not_called()
             async def consume(response):
                 return [part async for part in response.body_iterator]
             await asyncio.gather(consume(first), consume(second))

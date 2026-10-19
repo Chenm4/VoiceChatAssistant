@@ -1,19 +1,36 @@
 <template>
   <div class="input-area">
-    <div class="input-wrapper">
-      <div class="composer-tools">
-        <slot name="scenes" />
-        <slot name="microphone" />
-        <div class="capture-mode-row">
+    <Teleport to="#input-settings-controls" defer>
+        <el-popover placement="bottom-start" :width="420" trigger="click">
+          <template #reference>
+            <el-button aria-label="输入设置">输入</el-button>
+          </template>
+          <div class="input-device-menu">
+          <slot name="layout" />
+          <slot name="microphone" />
+          <div class="capture-mode-row">
           <button type="button" @click="$emit('toggle-capture-mode')" class="capture-mode-toggle" title="点击切换截图发送方式">
             截图：{{ captureMode === 'collect' ? '累积' : '逐张' }}
           </button>
-          <span v-if="captureConnected" class="capture-label" :title="captureSourceName">{{ captureSourceName || '已共享' }}</span>
-          <button v-if="captureConnected" type="button" @click="$emit('reset-capture')">更换来源</button>
+          <span v-if="captureConnected" class="capture-label" :title="captureSourceName">{{ captureSourceName || '已连接' }}</span>
+          <slot name="capture-source" />
+          <label class="capture-size-control">拍照大小
+            <input type="range" min="40" max="120" step="4" :value="captureButtonSize"
+              aria-label="拍照按钮大小" @input="$emit('resize-capture', Number($event.target.value))" />
+            <span>{{ captureButtonSize }}</span>
+          </label>
+          <span v-if="isUploadingImages">图片上传中…</span>
           <span v-if="pendingCaptureCount">待发 {{ pendingCaptureCount }}</span>
           <span v-if="activeCaptureCount">回答中 {{ activeCaptureCount }}</span>
           <button v-if="pendingCaptureCount" type="button" @click="$emit('clear-captures')">清空</button>
-        </div>
+          </div>
+          </div>
+        </el-popover>
+    </Teleport>
+    <div class="input-wrapper">
+      <div v-if="$slots.scenes" class="composer-tools">
+        <slot name="scenes" />
+
       </div>
       <div v-if="pendingCaptures.length" class="pending-captures">
         <div v-for="item in pendingCaptures" :key="item.id" class="pending-capture">
@@ -27,6 +44,7 @@
             ref="textarea"
             :value="modelValue"
             @input="handleInput"
+            @paste="handlePaste"
             @keydown="handleKeyDown"
             @compositionstart="handleCompositionStart"
             @compositionend="handleCompositionEnd"
@@ -38,30 +56,33 @@
             class="input-textarea"
           ></textarea>
         </div>
-        <span class="capture-anchor-space" aria-hidden="true"></span>
+        <span class="capture-anchor-space" :style="{ width: `${captureButtonSize}px`, minWidth: `${captureButtonSize}px`, flexBasis: `${captureButtonSize}px` }" aria-hidden="true"></span>
         <button 
-          @click="$emit('send')"
-          :disabled="captureResponsesActive || (!isSending && !modelValue.trim() && !pendingCaptureCount)"
+          @click="(isSending || captureResponsesActive) ? $emit('stop') : $emit('send')"
+          :disabled="isStopping || (!(isSending || captureResponsesActive) && (isUploadingImages || (!modelValue.trim() && !pendingCaptureCount)))"
           class="send-button"
           :class="{ 
             active: !isSending && (modelValue.trim() || pendingCaptureCount),
-            stop: isSending
+            stop: isSending || captureResponsesActive
           }"
-          :title="captureResponsesActive ? '截图正在并行回答' : (isSending ? '停止生成' : '发送消息')"
-          :aria-label="captureResponsesActive ? '截图正在并行回答' : (isSending ? '停止生成' : '发送消息')"
+          :title="isStopping ? '正在停止…' : ((isSending || captureResponsesActive) ? '停止生成' : '发送消息')"
+          :aria-label="isStopping ? '正在停止…' : ((isSending || captureResponsesActive) ? '停止生成' : '发送消息')"
         >
-          <svg v-if="!isSending" class="send-icon" viewBox="0 0 20 20" aria-hidden="true">
+          <svg v-if="!isSending && !captureResponsesActive" class="send-icon" viewBox="0 0 20 20" aria-hidden="true">
             <path d="M10 15.5V4.5M5.75 8.75 10 4.5l4.25 4.25" />
           </svg>
-          <span v-else class="stop-icon" aria-hidden="true"></span>
+          <template v-else>
+            <span class="stop-icon" aria-hidden="true"></span>
+            <span class="stop-label">{{ isStopping ? '正在停止…' : '停止生成' }}</span>
+          </template>
         </button>
       </div>
-      <div class="composer-hint"><span>文字 · 语音 · 截图</span><span>Enter 发送 <span class="hint-divider">/</span> Shift + Enter 换行</span></div>
     </div>
   </div>
 </template>
 
 <script setup>
+import { clipboardImages } from '../utils/imageAttachments'
 import { ref, watch, nextTick, onMounted } from 'vue'
 
 const props = defineProps({
@@ -73,6 +94,7 @@ const props = defineProps({
     type: Boolean,
     default: false
   },
+  isStopping: { type: Boolean, default: false },
   isRecording: { type: Boolean, default: false },
   captureConnected: {
     type: Boolean,
@@ -86,15 +108,24 @@ const props = defineProps({
   pendingCaptureCount: { type: Number, default: 0 },
   pendingCaptures: { type: Array, default: () => [] },
   captureResponsesActive: { type: Boolean, default: false },
-  activeCaptureCount: { type: Number, default: 0 }
+  activeCaptureCount: { type: Number, default: 0 },
+  isUploadingImages: Boolean,
+  captureButtonSize: { type: Number, default: 64 }
 })
 
-const emit = defineEmits(['update:modelValue', 'send', 'reset-capture', 'toggle-capture-mode', 'clear-captures', 'remove-capture'])
+const emit = defineEmits(['update:modelValue', 'send', 'stop', 'reset-capture', 'toggle-capture-mode', 'clear-captures', 'remove-capture', 'paste-images', 'resize-capture'])
 
 const textarea = ref(null)
 const isFocused = ref(false)
 let isComposing = false
 let compositionEndedAt = 0
+
+function handlePaste(event) {
+  const images = clipboardImages(event.clipboardData)
+  if (!images.length) return
+  event.preventDefault()
+  emit('paste-images', images)
+}
 
 function handleInput(e) {
   emit('update:modelValue', e.target.value)
@@ -134,7 +165,7 @@ function adjustHeight(followLatest = false) {
     if (textarea.value) {
       const previousScrollTop = textarea.value.scrollTop
       textarea.value.style.height = 'auto'
-      textarea.value.style.height = Math.min(textarea.value.scrollHeight, 200) + 'px'
+      textarea.value.style.height = Math.min(textarea.value.scrollHeight, 120) + 'px'
       textarea.value.scrollTop = followLatest ? textarea.value.scrollHeight : previousScrollTop
     }
   })
@@ -149,7 +180,10 @@ onMounted(() => adjustHeight(true))
 </script>
 
 <style scoped>
-.composer-tools { display:flex; align-items:center; flex-wrap:wrap; gap:6px 12px; margin-bottom:6px; }
+.input-device-menu { display: flex; flex-direction: column; gap: 14px; max-height: 65vh; overflow: auto; }
+.input-device-menu :deep(select) { max-width: 100%; min-width: 0; }
+.input-device-menu :deep(label) { max-width: 100%; }
+.composer-tools { display:flex; align-items:center; flex-wrap:wrap; gap:4px 10px; margin-bottom:4px; }
 .capture-meta-row {
   display: flex;
   align-items: center;
@@ -263,7 +297,7 @@ onMounted(() => adjustHeight(true))
   font-size: 16px;
   line-height: 1.65;
   resize: none;
-  max-height: 200px;
+  max-height: 120px;
   overflow-y: auto;
   transition: color .18s ease;
   background: white;
@@ -322,6 +356,7 @@ onMounted(() => adjustHeight(true))
   stroke-linejoin: round;
 }
 
+.stop-label { font-size: 13px; font-weight: 600; white-space: nowrap; }
 .stop-icon {
   width: 10px;
   height: 10px;
@@ -358,11 +393,19 @@ onMounted(() => adjustHeight(true))
 }
 
 .send-button.stop {
+  position: relative;
+  z-index: 32;
+  width: auto;
+  min-width: 100px;
+  padding: 0 12px;
+  gap: 7px;
+  border-radius: 10px;
+  animation: none;
   background: #dc2626;
   color: white;
   cursor: pointer;
   box-shadow: 0 3px 9px rgba(220, 38, 38, .24);
-  animation: pulse 2s ease-in-out infinite;
+
 }
 
 .send-button.stop:hover {
@@ -383,4 +426,9 @@ onMounted(() => adjustHeight(true))
     opacity: 0.8;
   }
 }
+</style>
+
+<style scoped>
+.capture-size-control { display: inline-flex; align-items: center; gap: 5px; }
+.capture-size-control input { width: 76px; cursor: pointer; }
 </style>

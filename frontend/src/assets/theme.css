@@ -96,14 +96,13 @@ body .el-overlay { background: #2f2f2f40; backdrop-filter: blur(4px); }
 .hint-divider { margin: 0 7px; color: #c3c3c3; }
 #app .send-button { background: #efefef; color: #a7a7a7; border-radius: 11px; }
 #app .send-button.active, #app .send-button.active:hover { background: #dedede; color: #4e4e4e; box-shadow: none; }
-#app .send-button.stop { background: #f3ddd6; color: #ab6056; box-shadow: none; }
-#app .capture-float-button { background: #ededed; color: #6d6d6d; box-shadow: none; border-radius: 11px; }
-#app .capture-float-button:hover:not(:disabled) { background: #e1e1e1; box-shadow: none; }
-#app .voice-button { background: #e8e8e8; border: 1px solid #d7d7d7; box-shadow: 0 4px 18px #4747470c; z-index: 30; }
+#app .send-button.stop { background: #b42318; color: #fff; box-shadow: none; }
+#app .capture-float-button { background: transparent; color: #6d6d6d; box-shadow: none; border-radius: 11px; }
+#app .capture-float-button:hover:not(:disabled) { background: transparent; box-shadow: none; }
+#app .voice-button { background: transparent; border: 1px solid #d7d7d7; box-shadow: 0 4px 18px #4747470c; z-index: 30; }
 #app .voice-button .icon { color: #6b6b6b; }
-#app .voice-button:hover { background: #dfdfdf; border-color: #cbcbcb; box-shadow: 0 5px 20px #47474712; }
-#app .voice-button.recording, #app .voice-button.recording:hover { background: #f0fdf4; border-color: #86efac; box-shadow: 0 0 0 calc(2px + var(--volume, 0) * 5px) #22c55e20; }
-#app .voice-button.recording .icon { color: #15803d; }
+#app .voice-button:hover { background: transparent; border-color: #cbcbcb; box-shadow: 0 5px 20px #47474712; }
+#app .voice-button.recording, #app .voice-button.recording:hover { background: transparent; border-color: #b8bec5; box-shadow: 0 2px 10px #00000006; }
 /* Comfortable editorial typography and light conversation surfaces. */
 #app .chat-container { background: var(--paper); padding: 28px 36px 90px; max-width: 1192px; }
 #app .message { margin-bottom: 28px; }
@@ -263,13 +262,13 @@ body .el-message { max-width: calc(100vw - 32px); border-radius: 12px; box-shado
 #app .input-container { border-color: #e6e6e6; box-shadow: 0 2px 8px #00000003; }
 #app .input-container.focused { border-color: #bbb; box-shadow: 0 0 0 3px #00000003; }
 #app .send-button.active, #app .send-button.active:hover { background: #333; color: #fff; }
-#app .voice-button { background: #fff; border-color: #e6e6e6; box-shadow: 0 2px 10px #00000006; }
-#app .voice-button:hover { background: #f5f5f5; border-color: #d4d4d4; }
+#app .voice-button { background: transparent; border-color: #e6e6e6; box-shadow: 0 2px 10px #00000006; }
+#app .voice-button:hover { background: transparent; border-color: #d4d4d4; }
 #app .user-bubble .bubble-content { background: #f5f5f5; border-color: transparent; }
 #app .session-meta { font-size: 11px; color: #8a8a8a; }
 #app .welcome-state h2 { font-weight: 450; color: #333; }
 #app .save-status { background: #f6f6f6; border-color: #e6e6e6; color: #666; }
-#app .capture-float-button.connected { background: #eee; color: #333; }
+#app .capture-float-button.connected { background: transparent; color: #333; }
 #app .capture-dot, #app .connected-dot { background: #666; box-shadow: none; }
 
 #app .session-settings { position: relative; }
@@ -280,3 +279,10 @@ body:has(.session-settings.is-resizing), body:has(.session-settings.is-resizing)
 #app .session-meta { flex-wrap: wrap; column-gap: 8px; row-gap: 3px; }
 #app .session-meta .time { flex-shrink: 0; overflow: visible; }
 @media(max-width: 1100px) { #app .session-settings { position: fixed; } }
+
+/* Prevent horizontal overscroll from navigating browser history. */
+html, body, #app, .chat-view, .chat-container, .transcript { overscroll-behavior-x: none; }
+#app .composer-overlay { background: transparent; }
+#app .composer-overlay .input-container { background: rgb(255 255 255 / var(--composer-opacity, .25)); box-shadow: none; }
+#app .composer-overlay .input-container.focused { box-shadow: none; }
+#app .chat-main .chat-container { padding-top: calc(var(--composer-height, 80px) + 20px); }

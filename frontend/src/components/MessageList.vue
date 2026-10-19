@@ -53,6 +53,8 @@
         v-for="(msg, index) in messages" 
         :key="index" 
         class="message mb-6"
+        :data-message-index="index"
+        :data-message-id="msg.id || msg.local_request_id || ''"
         :class="[
           msg.role === 'user' ? 'user-message' : 'assistant-message',
           { 'selected': selectedIndices.has(index) }
@@ -64,12 +66,12 @@
           <!-- 用户消息：复选框在右边 -->
           <div class="message-row">
             <div class="message-content-wrapper">
-              <div class="message-bubble user-bubble">
+              <div class="message-bubble user-bubble" @dblclick="handleMessageDoubleClick($event, index, msg.content)">
                 <!-- 编辑模式 -->
                 <div v-if="editingIndex === index" class="bubble-content editing">
                   <div v-if="willRegenerateAfterEdit" class="regenerate-hint">
                     <AppIcon name="info-circle" class=" " />
-                    保存后将删除后续消息并重新生成响应
+                    Enter 保存并重新回答 · Shift+Enter 换行
                   </div>
                   <div v-if="editingAttachments.length" class="message-attachments">
                     <div v-for="attachment in editingAttachments" :key="attachment.id" class="editing-attachment">
@@ -79,20 +81,17 @@
                       <button type="button" class="remove-attachment" title="移除图片" @click="removeEditingAttachment(attachment.id)">×</button>
                     </div>
                   </div>
-                  <label class="add-attachment">
-                    + 添加图片
-                    <input type="file" accept="image/png,image/jpeg,image/webp" multiple hidden @change="addEditingImages" />
-                  </label>
                   <button type="button" class="add-attachment" @click="emit('capture-edit-image')">拍照添加</button>
                   <textarea
                     ref="editTextarea"
                     v-model="editingContent"
                     class="edit-textarea"
-                    @keydown.ctrl.enter="saveEdit(index)"
+                    @paste="handleEditPaste"
+                    @keydown="handleEditKeyDown($event, index)"
                     @keydown.esc="cancelEdit"
                   ></textarea>
                   <div class="edit-actions">
-                    <button @click="saveEdit(index)" class="btn-save" :disabled="isUploadingEditImages">
+                    <button @click="saveEdit(index)" class="btn-save" :disabled="isUploadingEditImages || isSavingEdit">
                       <AppIcon name="check" class=" " />
                       {{ willRegenerateAfterEdit ? '保存并重新生成' : '保存' }}
                     </button>
@@ -119,7 +118,7 @@
                       />
                     </button>
                   </div>
-                  <div class="message-text whitespace-pre-wrap">{{ msg.content }}</div>
+                  <div class="message-text whitespace-pre-wrap" title="双击编辑">{{ msg.content }}</div>
                 </div>
                 
                 <!-- 悬浮操作按钮 - 右下角 -->
@@ -195,15 +194,25 @@
                     class="model-message-card"
                     :class="{ 'fullscreen-card': getFocusedModelIndex(index, msg) === modelIndex }"
                     :style="getModelCardStyle(index, msg)"
+                    @dblclick="handleMessageDoubleClick($event, index, modelMsg.content, modelIndex)"
                   >
                     <div class="model-card-header">
                       <button type="button" class="model-name-button" title="切换聚焦显示" @click="toggleModelView(index, msg, modelIndex)">{{ getModelDisplayName(modelMsg) }}</button>
                       <ReasoningButtons v-if="!isSelectionMode" :options="reasoningOptions(modelMsg)" :value="defaultEffortForModel(modelMsg)" :disabled="isGenerating" :label="getModelDisplayName(modelMsg) + ' 的思考强度'" @change="rerunSelectedModel(index, msg, modelMsg, $event)" />
                     </div>
                     <!-- 消息内容 -->
-                    <div class="bubble-content">
+                    <div v-if="editingIndex === index && editingModelIndex === modelIndex" class="bubble-content editing">
+                      <textarea ref="editTextarea" v-model="editingContent" class="edit-textarea"
+                        @keydown="handleEditKeyDown($event, index)" @keydown.esc="cancelEdit" />
+                      <div class="edit-actions">
+                        <button class="btn-save" :disabled="isSavingEdit || isGenerating" @click="saveEdit(index)">保存</button>
+                        <button class="btn-cancel" @click="cancelEdit">取消</button>
+                      </div>
+                    </div>
+                    <div v-else class="bubble-content">
                       <div class="message-text">
-                        <div class="markdown-body" v-html="renderMarkdown(modelMsg.content)"></div>
+                        <ReasoningContent :text="modelMsg.reasoning_content" :streaming="modelMsg.is_streaming" :has-answer="!!modelMsg.content" />
+                        <AlgorithmAnswer :content="modelMsg.content" />
                         <div v-if="(isTyping && index === messages.length - 1 && !modelMsg.content) || msg.is_typing_dots" class="flex gap-1 mt-2">
                           <span class="w-2 h-2 rounded-full bg-gray-400 typing-dot"></span>
                           <span class="w-2 h-2 rounded-full bg-gray-400 typing-dot"></span>
@@ -259,7 +268,7 @@
               <div class="avatar assistant-avatar">
                 <span class="avatar-label">答</span>
               </div>
-              <div class="message-bubble assistant-bubble">
+              <div class="message-bubble assistant-bubble" @dblclick="handleMessageDoubleClick($event, index, msg.content)">
                 <!-- 模型标识 -->
                 <div v-if="msg.model_info" class="model-badge">
                   <el-tag size="small" effect="plain" :type="getModelTagType(msg.model_info.provider)">
@@ -272,17 +281,18 @@
                 <div v-if="editingIndex === index" class="bubble-content editing">
                   <div v-if="willRegenerateAfterEdit" class="regenerate-hint">
                     <AppIcon name="info-circle" class=" " />
-                    保存后将删除后续消息并重新生成响应
+                    Enter 保存并重新回答 · Shift+Enter 换行
                   </div>
                   <textarea
                     ref="editTextarea"
                     v-model="editingContent"
                     class="edit-textarea"
-                    @keydown.ctrl.enter="saveEdit(index)"
+                    @paste="handleEditPaste"
+                    @keydown="handleEditKeyDown($event, index)"
                     @keydown.esc="cancelEdit"
                   ></textarea>
                   <div class="edit-actions">
-                    <button @click="saveEdit(index)" class="btn-save">
+                    <button @click="saveEdit(index)" class="btn-save" :disabled="isSavingEdit || isGenerating">
                       <AppIcon name="check" class=" " />
                       {{ willRegenerateAfterEdit ? '保存并重新生成' : '保存' }}
                     </button>
@@ -294,7 +304,8 @@
                 <!-- 正常显示 -->
                 <div v-else class="bubble-content">
                   <div class="message-text">
-                    <div class="markdown-body" v-html="renderMarkdown(msg.content)"></div>
+                    <ReasoningContent :text="msg.reasoning_content" :streaming="msg.is_streaming" :has-answer="!!msg.content" />
+                    <AlgorithmAnswer :content="msg.content" />
                     <div v-if="(isTyping && index === messages.length - 1 && !msg.content) || msg.is_typing_dots" class="flex gap-1 mt-2">
                       <span class="w-2 h-2 rounded-full bg-gray-400 typing-dot"></span>
                       <span class="w-2 h-2 rounded-full bg-gray-400 typing-dot"></span>
@@ -344,9 +355,13 @@
 <script setup>
 import { AudioLines, MessageSquare, Mic, ScanLine } from 'lucide-vue-next'
 import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { captureReadingPosition as capturePosition, restoreReadingPosition as restorePosition } from '../utils/scrollPosition'
 import { ElMessage } from 'element-plus'
 import AnswerVersions from './AnswerVersions.vue'
 import ReasoningButtons from './ReasoningButtons.vue'
+import ReasoningContent from './ReasoningContent.vue'
+import AlgorithmAnswer from './AlgorithmAnswer.vue'
+import { clipboardImages, uploadChatImage } from '../utils/imageAttachments'
 import { renderMarkdown } from '../utils/markdown'
 import { blobToDataUrl, copyRichContent } from '../utils/clipboard'
 
@@ -562,12 +577,15 @@ const editTextarea = ref(null)
 
 // 编辑相关
 const editingIndex = ref(null)
+const editingModelIndex = ref(null)
 const editingContent = ref('')
+const isSavingEdit = ref(false)
 const editingAttachments = ref([])
 const isUploadingEditImages = ref(false)
 const newEditingImageIds = new Set()
 const editingSessionId = ref(null)
 let editUploadVersion = 0
+let editingImageUploads = 0
 
 function releaseUnusedEditingImage(id, sessionId = editingSessionId.value) {
   if (!sessionId || !id) return
@@ -596,24 +614,23 @@ function addCapturedEditingImage(attachment, sessionId) {
   return true
 }
 
-async function addEditingImages(event) {
-  const files = Array.from(event.target.files || [])
-  event.target.value = ''
+async function handleEditPaste(event) {
+  if (props.messages[editingIndex.value]?.role !== 'user') return
+  const files = clipboardImages(event.clipboardData)
+  if (!files.length) return
+  event.preventDefault()
+  await addEditingImages(files)
+}
+
+async function addEditingImages(files) {
   if (!props.currentSessionId || !files.length) return
   const version = editUploadVersion
   const sessionId = props.currentSessionId
+  editingImageUploads++
   isUploadingEditImages.value = true
   try {
     for (const file of files) {
-      const form = new FormData()
-      form.append('session_id', sessionId)
-      form.append('screenshot', file, file.name)
-      const response = await fetch('/api/attachments/screenshots', { method: 'POST', body: form })
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({}))
-        throw new Error(error.detail || `图片上传失败 (${response.status})`)
-      }
-      const attachment = await response.json()
+      const attachment = await uploadChatImage(file, sessionId)
       if (version !== editUploadVersion || sessionId !== props.currentSessionId) {
         releaseUnusedEditingImage(attachment.id, sessionId)
         return
@@ -622,9 +639,10 @@ async function addEditingImages(event) {
       editingAttachments.value.push(attachment)
     }
   } catch (error) {
-    ElMessage.error(error.message || '添加图片失败')
+    ElMessage.error(error.message || '粘贴图片失败')
   } finally {
-    isUploadingEditImages.value = false
+    editingImageUploads--
+    isUploadingEditImages.value = editingImageUploads > 0
   }
 }
 
@@ -689,52 +707,59 @@ watch(() => props.messages.length, (newCount) => {
   }
 })
 
-// 发送后让最新消息保持可见；额外的底部阅读空间仍可手动滚入。
-function scrollToBottom() {
-  nextTick(() => {
-    const scroller = container.value
-    const lastMessage = scroller?.querySelector('.message:last-of-type')
-    if (!lastMessage) return
-    const distance = lastMessage.getBoundingClientRect().bottom - scroller.getBoundingClientRect().bottom + 20
-    scroller.scrollTop += distance
-  })
+// 开始编辑
+function handleMessageDoubleClick(event, index, content, modelIndex = null) {
+  if (event.target.closest('button, a, input, textarea, select, .model-card-resize-handle')) return
+  if (editingIndex.value === index && editingModelIndex.value === modelIndex) return
+  startEdit(index, content, modelIndex)
 }
 
-// 监听消息变化 - 已注释掉自动滚动，避免打断用户阅读
-// watch(() => props.messages, scrollToBottom, { deep: true })
-// watch(() => props.isTyping, scrollToBottom)
-
-// 开始编辑
-function startEdit(index, content) {
+function startEdit(index, content, modelIndex = null) {
+  if (isSelectionMode.value || isSavingEdit.value) return
+  willRegenerateAfterEdit.value = props.messages[index]?.role === 'user'
   editUploadVersion++
   discardNewEditingImages()
   editingIndex.value = index
+  editingModelIndex.value = modelIndex
   editingSessionId.value = props.currentSessionId
   editingContent.value = content
   editingAttachments.value = [...(props.messages[index]?.attachments || [])]
   nextTick(() => {
-    if (editTextarea.value && editTextarea.value.length > 0) {
-      editTextarea.value[0].focus()
-      editTextarea.value[0].style.height = 'auto'
-      editTextarea.value[0].style.height = editTextarea.value[0].scrollHeight + 'px'
-    }
+    const textarea = Array.isArray(editTextarea.value) ? editTextarea.value.find(element => element?.isConnected) : editTextarea.value
+    if (!textarea) return
+    textarea.focus()
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length)
+    textarea.style.height = 'auto'
+    textarea.style.height = textarea.scrollHeight + 'px'
+    textarea.scrollTop = textarea.scrollHeight
   })
 }
 
 // 编辑模式下的重新生成标志
 const willRegenerateAfterEdit = ref(false)
 
-// 保存编辑
+function handleEditKeyDown(event, index) {
+  // Enter confirms an IME candidate without submitting the message.
+  if (event.isComposing || event.keyCode === 229) return
+  if (event.key !== 'Enter' || event.shiftKey) return
+  event.preventDefault()
+  event.stopPropagation()
+  saveEdit(index)
+}
+
+// 保存用户问题后，使用现有接口保存修改并流式重新回答。
 async function saveEdit(index) {
-  if (isUploadingEditImages.value) return
+  if (editingIndex.value !== index || isUploadingEditImages.value || isSavingEdit.value) return
+  if (props.isGenerating && !willRegenerateAfterEdit.value) return ElMessage.warning('请修改问题重新生成，或停止生成后编辑回答正文')
   if (!editingContent.value.trim() && !editingAttachments.value.length) {
     ElMessage.warning('消息内容不能为空')
     return
   }
 
+  isSavingEdit.value = true
   try {
     const message = props.messages[index]
-    const messageId = message.id || `msg_${index}`
+    const messageId = message.id
     const newContent = editingContent.value.trim()
     const attachmentIds = message.role === 'user'
       ? editingAttachments.value.map(item => item.id)
@@ -743,13 +768,15 @@ async function saveEdit(index) {
     // 如果标记为需要重新生成，则触发重新生成
     if (willRegenerateAfterEdit.value && message.role === 'user') {
       editingIndex.value = null
+      editingModelIndex.value = null
       editingContent.value = ''
+      editingAttachments.value = []
       willRegenerateAfterEdit.value = false
       newEditingImageIds.clear()
       editingSessionId.value = null
       
       // 触发重新生成
-      emit('regenerate', { messageId, newContent, attachmentIds })
+      emit('regenerate', { messageId, messageIndex: index, newContent, attachmentIds })
       return
     }
     
@@ -761,7 +788,8 @@ async function saveEdit(index) {
       },
       body: JSON.stringify({
         content: newContent,
-        attachment_ids: attachmentIds
+        attachment_ids: attachmentIds,
+        ...(editingModelIndex.value !== null ? { model_key: getModelFullName(getMessageModels(message)[editingModelIndex.value]) } : {})
       })
     })
 
@@ -772,6 +800,7 @@ async function saveEdit(index) {
 
     emit('message-updated')
     editingIndex.value = null
+    editingModelIndex.value = null
     editingContent.value = ''
     editingAttachments.value = []
     newEditingImageIds.clear()
@@ -779,6 +808,8 @@ async function saveEdit(index) {
   } catch (error) {
     console.error('保存编辑失败:', error)
     ElMessage.error(`保存失败: ${error.message}`)
+  } finally {
+    isSavingEdit.value = false
   }
 }
 
@@ -787,6 +818,7 @@ function cancelEdit() {
   editUploadVersion++
   discardNewEditingImages()
   editingIndex.value = null
+  editingModelIndex.value = null
   editingSessionId.value = null
   editingContent.value = ''
   editingAttachments.value = []
@@ -1150,8 +1182,15 @@ onBeforeUnmount(() => {
   document.body.classList.remove('resizing-model-card')
 })
 
+function scrollToMessage(index) {
+  const message = container.value?.querySelector(`[data-message-index="${index}"]`)
+  message?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
 defineExpose({
-  scrollToBottom,
+  captureReadingPosition: () => capturePosition(container.value),
+  restoreReadingPosition: position => restorePosition(container.value, position),
+  scrollToMessage,
   addCapturedEditingImage
 })
 </script>
@@ -1251,6 +1290,7 @@ defineExpose({
   overflow-y: auto;
   overflow-x: hidden;
   scroll-behavior: auto;
+  scrollbar-gutter: stable;
   background: #f7f9fc;
 }
 
@@ -1296,7 +1336,7 @@ defineExpose({
 
 /* 消息样式 */
 .message {
-  animation: fadeInMessage 0.3s ease-out;
+  animation: none;
 }
 
 .message.selected {
@@ -1465,7 +1505,7 @@ defineExpose({
   align-items: flex-start;
   gap: 6px;
   width: 100%;
-  animation: fadeInMessage 0.3s ease-out;
+  animation: none;
 }
 
 .multi-model-messages {

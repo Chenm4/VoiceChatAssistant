@@ -24,6 +24,14 @@
 
     <div v-else class="settings-body">
       <div class="section">
+        <label class="label">鼠标右键</label>
+        <el-radio-group v-model="rightClickAction" aria-label="鼠标右键操作">
+          <el-radio-button value="record">语音识别（默认）</el-radio-button>
+          <el-radio-button value="photo">拍照</el-radio-button>
+        </el-radio-group>
+        <div class="model-order-hint">左键语音识别，右键可选择语音识别或拍照。两路输入设备在标题栏的输入设置中分别选择。</div>
+      </div>
+      <div class="section">
         <div class="label-with-tag">
           <label class="label">模型选择</label>
           <el-tag size="small" type="info">支持跨配置源并行</el-tag>
@@ -198,14 +206,7 @@
       </div>
 
       <div class="section context-assistant-option">
-        <div class="label-with-tag">
-          <label class="label">发送历史 AI 回答</label>
-          <el-tag size="small" type="info">可选</el-tag>
-        </div>
-        <el-switch v-model="includeAssistantHistory" />
-        <div class="prompt-hint">
-          关闭可节省上下文；开启后会把对应模型的历史回答一并发送。
-        </div>
+        <div class="prompt-hint">历史问题按 user 消息逐条发送，只回答最后一个问题；历史 AI 回答不发送给模型。</div>
       </div>
 
       <div class="section display-settings-section">
@@ -329,12 +330,12 @@
 
       <div v-if="session?.session_config?.active_scene" class="section">
         <label class="label">当前场景：{{ session.session_config.active_scene.name }}</label>
-        <p class="prompt-hint">以下内容与「管理场景」同步，仅附加到本轮用户消息，不写入历史，不随轮数叠加。默认背景资料在恢复默认后使用。</p>
-        <label class="label">场景用户提示词</label>
+        <p class="prompt-hint">以下内容与「管理场景」同步，追加到系统提示词末尾，不放入用户问题、不随历史轮数叠加。默认背景资料在恢复默认后使用。</p>
+        <label class="label">场景提示词</label>
         <el-input v-model="sceneRules" type="textarea" :rows="4" resize="vertical" />
         <label class="label" style="margin-top:12px">项目资料</label>
         <el-input v-model="sceneBackground" type="textarea" :rows="6" resize="vertical" />
-        <details style="margin-top:12px"><summary>查看场景用户提示词预览</summary><pre style="white-space:pre-wrap">{{ effectiveScenePrompt }}</pre></details>
+        <details style="margin-top:12px"><summary>查看系统提示词与场景拼接预览</summary><pre style="white-space:pre-wrap">{{ effectiveScenePrompt }}</pre></details>
       </div>
       <div v-else class="section">
         <div class="label-with-tag">
@@ -494,6 +495,7 @@ const contextTurns = ref(15)
 const contextChars = ref(12000)
 const includeAssistantHistory = ref(false)
 const screenshotPrompt = ref(DEFAULT_SCREENSHOT_PROMPT)
+const rightClickAction = ref('record')
 const displayFontSize = ref(16)
 const displayLineHeight = ref(1.7)
 const saving = ref(false)
@@ -501,11 +503,11 @@ const systemPrompt = ref('')
 const sceneRules = ref('')
 const sceneBackground = ref('')
 const effectiveScenePrompt = computed(() => [
+  props.session?.session_config?.active_scene?.use_scene_rules_as_system ? '' : systemPrompt.value.trim(),
   '【当前场景】\n' + (props.session?.session_config?.active_scene?.name || ''),
   sceneRules.value.trim() ? '【场景要求】\n' + sceneRules.value.trim() : '',
   sceneBackground.value.trim() ? '【当前项目资料】\n' + sceneBackground.value.trim() : '',
-  '历史仅供理解问题，其他项目的经历不能当作当前项目事实。',
-  '【当前问题】\n（发送时使用本次输入）'
+  '当前场景资料以此处为准，历史项目资料仅供参考，不可混用。'
 ].filter(Boolean).join('\n\n'))
 const backgroundContext = ref('')
 const backgroundMode = ref('shared')
@@ -692,8 +694,9 @@ function getFormState() {
     top_p: Number(topP.value),
     max_history_turns: Number(contextTurns.value),
     max_history_chars: Number(contextChars.value),
-    include_assistant_history: Boolean(includeAssistantHistory.value),
+    include_assistant_history: false,
     screenshot_prompt: screenshotPrompt.value,
+    right_click_action: rightClickAction.value,
     display_font_size: Number(displayFontSize.value),
     display_line_height: Number(displayLineHeight.value),
     system_prompt: systemPrompt.value,
@@ -806,7 +809,8 @@ function initFromSession() {
     topP.value = sessionConfig.top_p ?? 1
     contextTurns.value = sessionConfig.max_history_turns ?? 15
     contextChars.value = sessionConfig.max_history_chars ?? 12000
-    includeAssistantHistory.value = sessionConfig.include_assistant_history ?? false
+    includeAssistantHistory.value = false
+    rightClickAction.value = sessionConfig.right_click_action || 'record'
     screenshotPrompt.value = sessionConfig.screenshot_prompt || DEFAULT_SCREENSHOT_PROMPT
     displayFontSize.value = sessionConfig.display_font_size ?? 16
     displayLineHeight.value = sessionConfig.display_line_height ?? 1.7
@@ -839,6 +843,7 @@ function initFromSession() {
     contextTurns.value = 15
     contextChars.value = 12000
     includeAssistantHistory.value = false
+    rightClickAction.value = 'record'
     screenshotPrompt.value = DEFAULT_SCREENSHOT_PROMPT
     displayFontSize.value = 16
     displayLineHeight.value = 1.7
@@ -985,8 +990,9 @@ async function handleSave() {
       top_p: Number(topP.value),
       max_history_turns: Number(contextTurns.value),
       max_history_chars: Number(contextChars.value),
-      include_assistant_history: Boolean(includeAssistantHistory.value),
+      include_assistant_history: false,
       screenshot_prompt: screenshotPrompt.value.trim(),
+      right_click_action: rightClickAction.value,
       display_font_size: Number(displayFontSize.value),
       display_line_height: Number(displayLineHeight.value),
       answer_highlight_enabled: props.session.session_config?.answer_highlight_enabled ?? false,
@@ -1000,6 +1006,9 @@ async function handleSave() {
         : null
     }
     const response = await api.put(`/sessions/${props.session.id}/config`, payload)
+    if (!response.success || response.config?.right_click_action !== payload.right_click_action) {
+      throw new Error('后端未保存右键操作，请重启后端服务后重试')
+    }
     if (response.success) {
       saveMultiModelPreferences()
       setFormBaseline()
@@ -1025,6 +1034,7 @@ function handleReset() {
   contextChars.value = 12000
   includeAssistantHistory.value = false
   screenshotPrompt.value = DEFAULT_SCREENSHOT_PROMPT
+  rightClickAction.value = 'record'
   displayFontSize.value = 16
   displayLineHeight.value = 1.7
   systemPrompt.value = ''

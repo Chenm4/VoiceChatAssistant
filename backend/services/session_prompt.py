@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from backend.api.models import Session, SessionConfig
+from backend.api.models import Session, SessionConfig, ModelTarget
 
 
 logger = logging.getLogger(__name__)
@@ -74,6 +74,12 @@ def create_default_session_config() -> SessionConfig:
     """Create the config used only for newly created sessions."""
     prompt = load_prompt_template_snapshot()
     return SessionConfig(
+        source_name='通义千问',
+        models=['qwen3.8-max', 'qwen3.7-plus'],
+        model_targets=[
+            ModelTarget(source_name='通义千问', model='qwen3.8-max', reasoning_effort='none'),
+            ModelTarget(source_name='通义千问', model='qwen3.7-plus', reasoning_effort='low'),
+        ],
         system_prompt=prompt["system_prompt"],
         prompt_template_id=prompt["id"],
         prompt_template_version=prompt["version"],
@@ -105,9 +111,19 @@ def compose_session_system_prompt(session: Session) -> Optional[str]:
     """
     config = session.session_config
     if config and config.active_scene:
-        # Scene instructions belong only to the current user request, never history.
-        rules = config.system_prompt if config.system_prompt is not None else session.system_prompt or config.scene_common_rules
-        return _with_answer_highlight(rules.strip() or None, config)
+        scene = config.active_scene
+        rules = '' if scene.use_scene_rules_as_system else (
+            config.system_prompt if config.system_prompt is not None
+            else session.system_prompt or config.scene_common_rules)
+        base = _with_answer_highlight(rules.strip() or None, config)
+        parts = [base] if base else []
+        parts.append('【当前场景】\n' + scene.name)
+        if scene.rules.strip():
+            parts.append('【场景要求】\n' + scene.rules.strip())
+        if scene.background.strip():
+            parts.append('【当前项目资料】\n' + scene.background.strip())
+        parts.append('当前场景资料以此处为准，历史项目资料仅供参考，不可混用。')
+        return '\n\n'.join(parts)
     if config is not None and config.system_prompt is not None:
         rules = config.system_prompt
     else:
@@ -137,15 +153,9 @@ def render_session_user_prompt(session: Session, question: str) -> str:
     """Render the session's snapshotted user template for one question."""
     config = session.session_config
     if config and config.active_scene:
-        scene = config.active_scene
-        parts = ["【当前场景】\n" + scene.name]
-        if scene.rules.strip():
-            parts.append("【场景要求】\n" + scene.rules.strip())
-        if scene.background.strip():
-            parts.append("【当前项目资料】\n" + scene.background.strip())
-        parts.append("历史仅供理解问题，其他项目的经历不能当作当前项目事实。")
-        parts.append("【当前问题】\n" + question)
-        return "\n\n".join(parts)
+        # The active scene is already appended to system; never duplicate its
+        # rules/background in the current question or conversation history.
+        return question
     template = config.user_prompt_template if config else None
     if not template:
         return question

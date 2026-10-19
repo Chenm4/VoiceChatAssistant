@@ -4,12 +4,11 @@
     type="button"
     class="capture-float-button"
     :class="{ connected, loading, ready }"
+    :style="{ width: `${size}px`, height: `${size}px` }"
     :aria-disabled="disabled"
-    :title="connected ? '左键拍照，右键取消共享（Shift + 右键复位位置）' : '左键选择窗口拍照，右键取消（Shift + 右键复位位置）'"
+    :title="(connected ? '左键拍照，拖动调整位置' : '左键连接所选来源并拍照，拖动调整位置') + (rightClickAction === 'photo' ? '；右键拍照' : '；右键语音识别／停止')"
     aria-label="截图答题"
     @pointerdown="handlePointerDown"
-    @wheel="handleWheel"
-    @contextmenu.prevent="handleContextMenu"
     @keydown.enter.prevent="!disabled && $emit('capture')"
     @keydown.space.prevent="!disabled && $emit('capture')"
   >
@@ -22,9 +21,11 @@
 </template>
 
 <script setup>
-import { nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
 const props = defineProps({
+  rightClickAction: { type: String, default: 'record' },
+  size: { type: Number, default: 64 },
   connected: { type: Boolean, default: false },
   loading: { type: Boolean, default: false },
   disabled: { type: Boolean, default: false }
@@ -50,8 +51,8 @@ let animationFrameId = null
 let layoutObserver = null
 
 function clampPosition(left, top) {
-  const width = button.value?.offsetWidth || 38
-  const height = button.value?.offsetHeight || 38
+  const width = button.value?.offsetWidth || props.size
+  const height = button.value?.offsetHeight || props.size
   return {
     left: Math.max(8, Math.min(left, window.innerWidth - width - 8)),
     top: Math.max(8, Math.min(top, window.innerHeight - height - 8))
@@ -72,7 +73,7 @@ function positionAtDefaultAnchor() {
   const anchor = document.querySelector('.capture-anchor-space')
   if (!anchor) return
   const rect = anchor.getBoundingClientRect()
-  applyPosition(rect.left, rect.top + (rect.height - (button.value?.offsetHeight || 38)) / 2)
+  applyPosition(rect.left, rect.top + (rect.height - (button.value?.offsetHeight || props.size)) / 2)
 }
 
 function loadPosition() {
@@ -101,20 +102,6 @@ function resetPosition() {
   localStorage.removeItem(STORAGE_KEY)
   customPosition = false
   positionAtDefaultAnchor()
-}
-
-function handleContextMenu(event) {
-  if (event.shiftKey) resetPosition()
-  else emit('cancel')
-}
-
-function handleWheel(event) {
-  if (event.ctrlKey) return
-  const scroller = button.value?.closest('.chat-view')?.querySelector('.chat-container')
-  if (!scroller) return
-  event.preventDefault()
-  const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? scroller.clientHeight : 1
-  scroller.scrollBy(event.deltaX * unit, event.deltaY * unit)
 }
 
 function handlePointerDown(event) {
@@ -180,6 +167,10 @@ function handleResize() {
   else positionAtDefaultAnchor()
 }
 
+defineExpose({ reposition: handleResize })
+
+watch(() => props.size, () => nextTick(handleResize))
+
 onMounted(() => {
   nextTick(() => {
     loadPosition()
@@ -210,16 +201,16 @@ onUnmounted(() => {
   left: 0;
   top: 0;
   z-index: 1100;
-  width: 38px;
-  height: 38px;
+  width: 64px;
+  height: 64px;
   border: 0;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #eef2ff;
+  background: transparent;
   color: #4f46e5;
-  box-shadow: 0 3px 10px rgba(15, 23, 42, .16);
+  box-shadow: none;
   cursor: grab;
   touch-action: none;
   user-select: none;
@@ -231,17 +222,17 @@ onUnmounted(() => {
 
 .capture-float-button:hover:not(:disabled) {
   transform: translateY(-1px) scale(1.04);
-  background: #e0e7ff;
+  background: transparent;
 }
 
 .capture-float-button:active:not(:disabled) { cursor: grabbing; }
 .capture-float-button.ready:disabled { cursor: not-allowed; opacity: .55; }
-.capture-float-button.connected { background: #ecfdf5; color: #059669; }
+.capture-float-button.connected { background: transparent; color: #059669; }
 .capture-float-button.loading svg { animation: capture-spin .9s linear infinite; }
 
 .capture-float-button svg {
-  width: 20px;
-  height: 20px;
+  width: 68%;
+  height: 68%;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.7;

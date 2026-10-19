@@ -56,7 +56,7 @@ class MicrophoneCaptureTests(unittest.IsolatedAsyncioTestCase):
         with patch('backend.services.streaming_asr.pyaudio.PyAudio') as factory:
             StreamingASR(preload=True)
             factory.assert_not_called()
-        asr = await self.capture(b'\x34\x12' * 960)
+        asr = await self.capture(b'\x34\x12\xcc\xed' * 480)
         self.assertEqual(asr.raw_peak, 0x1234)
         self.assertEqual(asr.processed_peak, 0x1234)
         self.assertGreater(asr.audio_level, 0)

@@ -12,6 +12,7 @@
     </button>
 
     <div v-if="!isCollapsed" class="sidebar-brand"><span class="brand-mark"><AudioLines :size="22" /></span><div><strong>轻语</strong><span>VOICE ASSISTANT</span></div></div>
+    <button v-if="!isCollapsed" class="sidebar-lab" @click="emit('open-prompt-lab')">提示词实验室</button>
     <!-- 顶部工具栏 -->
     <div class="sidebar-header" v-if="!isCollapsed">
       <div class="header-buttons">
@@ -171,6 +172,7 @@ const props = defineProps({
 })
 
 const emit = defineEmits([
+  'open-prompt-lab',
   'create-session',
   'switch-session',
   'delete-session',
@@ -309,6 +311,8 @@ function formatTime(timestamp) {
 </script>
 
 <style scoped>
+.sidebar-lab { margin: 0 20px 8px; min-height: 34px; border: 1px solid #e4e4e4; border-radius: 8px; background: white; color: #555; cursor: pointer; }
+.sidebar-lab:hover { background: #f0f0f0; }
 .session-sidebar {
   width: 260px;
   height: 100vh;

@@ -89,6 +89,7 @@ class ChatMessage(BaseModel):
     parent_id: Optional[str] = None  # 父消息 ID
     role: str  # 'user', 'assistant', or 'system'
     content: str
+    reasoning_content: str = ""
     type: str = "text"  # 消息类型: text, image, etc.
     attachments: List[MessageAttachment] = Field(default_factory=list)
     created_at: int = Field(default_factory=lambda: int(time.time()))
@@ -112,6 +113,7 @@ class PromptScene(BaseModel):
     name: str = Field(min_length=1, max_length=40)
     description: str = Field(default="", max_length=200)
     rules: str = Field(default="", max_length=30000)
+    use_scene_rules_as_system: bool = False
     background: str = Field(default="", max_length=100000)
 
 
@@ -126,6 +128,7 @@ class SessionConfig(BaseModel):
     active_scene: Optional[PromptScene] = None
     scene_common_rules: str = ""
     answer_highlight_enabled: bool = False
+    right_click_action: Literal["record", "photo"] = "record"
     source_name: Optional[str] = None
     models: List[str] = Field(default_factory=list)
     # New format: supports selecting models from multiple API sources.
@@ -175,6 +178,11 @@ class ChatResponse(BaseModel):
 class RecordingStartRequest(BaseModel):
     input_device_index: Optional[int] = Field(default=None, ge=0)
     input_device_name: Optional[str] = None
+    input_source: Literal['microphone', 'usb'] = 'microphone'
+    mix_inputs: bool = False
+    keep_other_input_open: bool = False
+    standby_input_device_index: Optional[int] = Field(default=None, ge=0)
+    standby_input_device_name: Optional[str] = None
 
 
 class RecordingResponse(BaseModel):
@@ -182,6 +190,7 @@ class RecordingResponse(BaseModel):
     success: bool
     message: Optional[str] = None
     text: Optional[str] = None
+    audio_file: Optional[str] = None
 
 
 class Session(BaseModel):
@@ -226,6 +235,8 @@ class SessionList(BaseModel):
 
 class MessageUpdateRequest(BaseModel):
     """消息更新请求"""
+    model_config = {"protected_namespaces": ()}
+    model_key: Optional[str] = None
     content: str
     attachment_ids: Optional[List[str]] = None
 

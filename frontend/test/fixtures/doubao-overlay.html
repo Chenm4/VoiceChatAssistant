@@ -1,0 +1,25 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>豆包 Markdown 和滚动验证</title><div id="app"></div>
+<script type="module">
+import { createApp, h, ref, onMounted } from 'vue'
+import DoubaoRealtimeOverlay from '/src/components/DoubaoRealtimeOverlay.vue'
+const content = '# 一级标题\n\n## 回答要点\n\n**加粗内容**\n\n- 第一项\n- 第二项\n\n### 代码示例\n\n```js\nconst answer = 42;\n```\n\n最后一行正文。'
+// Local fixture only: no recording or model request is sent.
+window.WebSocket = class {
+  static OPEN = 1
+  constructor() { this.readyState = 1; queueMicrotask(() => this.onopen?.()) }
+  send(raw) {
+    if (JSON.parse(raw).type !== 'start') return
+    for (const message of [{ type: 'ready' }, { event: 550, data: { content, reply_id: 'fixture' } }, { type: 'complete' }]) {
+      this.onmessage?.({ data: JSON.stringify(message) })
+    }
+  }
+  close() { this.readyState = 3 }
+}
+createApp({
+  setup() {
+    const overlay = ref(null)
+    onMounted(() => overlay.value.submit({ session_id: 'fixture', audio_file: 'fixture.wav', text: 'Markdown 渲染验证' }))
+    return () => h(DoubaoRealtimeOverlay, { ref: overlay, session: { id: 'fixture' } })
+  }
+}).mount('#app')
+</script></html>

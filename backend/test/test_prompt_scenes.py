@@ -12,6 +12,17 @@ from backend.services.session_prompt import compose_session_system_prompt, rende
 
 
 class PromptSceneTests(unittest.TestCase):
+    def test_exam_buttons_have_independent_rules_and_restore_default(self):
+        scenes = prompt_scenes.exam_scenes()
+        self.assertEqual([scene.name for scene in scenes], ['笔试专用', 'AI Coding 提问助手'])
+        self.assertIn('algorithm_answer', scenes[0].rules)
+        config = SessionConfig(system_prompt='INTERVIEW', active_scene=scenes[0], background_mode='none')
+        session = Session(id='exam', title='test', created_at=1, updated_at=1, session_config=config)
+        self.assertIn(scenes[0].rules, compose_session_system_prompt(session))
+        self.assertNotIn('COMMON', compose_session_system_prompt(session))
+        config.active_scene = None
+        self.assertEqual(compose_session_system_prompt(session), 'INTERVIEW')
+
     def test_active_scene_excludes_original_background_and_template(self):
         config = SessionConfig(system_prompt='COMMON', background_mode='shared',
                                user_prompt_template='OLD {{question}}',
@@ -21,14 +32,14 @@ class PromptSceneTests(unittest.TestCase):
         with patch('backend.services.session_prompt.load_shared_background', return_value='B FACTS') as shared:
             prompt = compose_session_system_prompt(session)
             shared.assert_not_called()
-        self.assertEqual(prompt, 'COMMON')
+        self.assertTrue(prompt.startswith('COMMON\n\n【当前场景】'))
         self.assertIn('COMMON', prompt)
         self.assertNotIn('STALE RULES', prompt)
         self.assertNotIn('B FACTS', prompt)
         user_prompt = render_session_user_prompt(session, 'question')
-        self.assertIn('A RULES', user_prompt)
-        self.assertIn('A FACTS', user_prompt)
-        self.assertTrue(user_prompt.endswith('【当前问题】\nquestion'))
+        self.assertIn('A RULES', prompt)
+        self.assertIn('A FACTS', prompt)
+        self.assertEqual(user_prompt, 'question')
         self.assertNotIn('OLD', user_prompt)
         config.active_scene = None
         with patch('backend.services.session_prompt.load_shared_background', return_value='B FACTS'):
@@ -84,8 +95,8 @@ class PromptSceneTests(unittest.TestCase):
         self.assertEqual(question.content, 'Question')
         messages = completion.chat.completions.create.call_args.kwargs['messages']
         self.assertEqual(sent.count('New facts'), 1)
-        self.assertNotIn('New facts', str([m for m in messages if m['role'] == 'system']))
-        self.assertIn('New facts', messages[-1]['content'])
+        self.assertIn('New facts', messages[0]['content'])
+        self.assertNotIn('New facts', messages[-1]['content'])
 
     def test_session_settings_edits_update_scene_catalog_and_effective_prompt(self):
         from backend.api import routes
@@ -107,10 +118,10 @@ class PromptSceneTests(unittest.TestCase):
         self.assertEqual(stored.background, 'new project facts')
         effective = compose_session_system_prompt(session)
         self.assertIn('new common', effective)
-        self.assertEqual(effective, 'new common')
+        self.assertTrue(effective.startswith('new common\n\n【当前场景】'))
         user_prompt = render_session_user_prompt(session, 'question')
-        self.assertIn('new scene rules', user_prompt)
-        self.assertIn('new project facts', user_prompt)
+        self.assertIn('new scene rules', effective)
+        self.assertIn('new project facts', effective)
         config.active_scene = None
         self.assertEqual(compose_session_system_prompt(session), 'new common')
 
@@ -155,11 +166,12 @@ class PromptSceneTests(unittest.TestCase):
                         [{'role': 'system', 'content': compose_session_system_prompt(session)}] + history,
                         render_session_user_prompt(session, question), include_assistant=include_assistant)
                     self.assertEqual(str(request).count(rules), 1)
-                    self.assertNotIn(rules, request[0]['content'])
+                    self.assertIn(rules, request[0]['content'])
+                    self.assertNotIn(rules, request[-1]['content'])
                     history.extend([{'role': 'user', 'content': question},
                                     {'role': 'assistant', 'content': f'回答 {turn}'}])
                 session.session_config.active_scene = PromptScene(id='b', name='B', rules='新的场景要求')
-                request = build_scoped_request(history, render_session_user_prompt(session, '原始问题 2'),
+                request = build_scoped_request([{'role': 'system', 'content': compose_session_system_prompt(session)}] + history, render_session_user_prompt(session, '原始问题 2'),
                                                include_assistant=include_assistant)
                 self.assertNotIn(rules, str(request))
                 self.assertEqual(str(request).count('新的场景要求'), 1)

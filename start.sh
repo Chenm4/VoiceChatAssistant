@@ -33,26 +33,37 @@ if [ -f ".env.local" ]; then
     set +a
 fi
 
-# 默认重启：清理占用本应用端口的旧服务，避免误把旧后端当作新进程。
+# 默认停止占用端口的旧服务，避免新进程连接到旧实例。
 stop_port_listener() {
     local port="$1"
     local pids pid
     pids=$(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
     if [ -n "$pids" ]; then
-        echo "🔄 端口 $port 已被占用，强制停止旧服务: $pids"
+        echo "🔄 端口 $port 已被占用，停止旧服务: $pids"
         for pid in $pids; do
             case "$pid" in
                 *[!0-9]*|'') continue ;;
             esac
-            kill -9 "$pid" 2>/dev/null || true
+            kill "$pid" 2>/dev/null || true
         done
     fi
-    for attempt in 1 2 3 4 5; do
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
         if ! lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | grep -q .; then
             return
         fi
         sleep 0.2
     done
+    # A process ignoring SIGTERM must be stopped before binding the same port.
+    pids=$(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+    for pid in $pids; do
+        case "$pid" in
+            *[!0-9]*|'') continue ;;
+        esac
+        kill -9 "$pid" 2>/dev/null || true
+    done
+    if ! lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | grep -q .; then
+        return
+    fi
     echo "❌ 无法释放端口 $port"
     exit 1
 }
@@ -60,6 +71,24 @@ stop_port_listener() {
 cleanup() {
     [ -z "$BACKEND_PID" ] || kill "$BACKEND_PID" 2>/dev/null || true
     [ -z "$FRONTEND_PID" ] || kill "$FRONTEND_PID" 2>/dev/null || true
+}
+
+# 启动耗时受依赖加载影响；本机探测不应经过系统代理或 IPv6 localhost。
+wait_for_service() {
+    local pid="$1" url="$2" label="$3" attempt
+    for attempt in {1..30}; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            echo "❌ $label 进程已退出，请查看上方错误日志"
+            return 1
+        fi
+        if curl --noproxy '*' --connect-timeout 1 --max-time 2 -skf "$url" > /dev/null; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    echo "❌ $label 启动超时，健康检查地址: $url"
+    curl --noproxy '*' --connect-timeout 1 --max-time 2 -skfS "$url" > /dev/null
+    return 1
 }
 
 if ! command -v lsof >/dev/null 2>&1; then
@@ -94,14 +123,7 @@ BACKEND_PID=$!
 
 # 等待后端启动
 echo "⏳ 等待后端启动..."
-sleep 3
-
-# 检查后端是否运行
-if ! kill -0 "$BACKEND_PID" 2>/dev/null || ! curl -sf http://localhost:8888/health > /dev/null; then
-    echo "❌ 后端启动失败"
-    kill $BACKEND_PID 2>/dev/null
-    exit 1
-fi
+wait_for_service "$BACKEND_PID" "http://127.0.0.1:8888/health" "后端" || exit 1
 
 echo "✅ 后端启动成功"
 echo ""
@@ -120,21 +142,7 @@ fi
 ) &
 FRONTEND_PID=$!
 
-for attempt in 1 2 3 4 5 6 7 8 9 10; do
-    if curl -skf "$FRONTEND_SCHEME://localhost:$FRONTEND_PORT/" > /dev/null; then
-        break
-    fi
-    if ! kill -0 "$FRONTEND_PID" 2>/dev/null; then
-        echo "❌ 前端启动失败"
-        exit 1
-    fi
-    sleep 1
-done
-
-if ! curl -skf "$FRONTEND_SCHEME://localhost:$FRONTEND_PORT/" > /dev/null; then
-    echo "❌ 前端启动超时"
-    exit 1
-fi
+wait_for_service "$FRONTEND_PID" "$FRONTEND_SCHEME://127.0.0.1:$FRONTEND_PORT/" "前端" || exit 1
 
 echo ""
 echo "================================"

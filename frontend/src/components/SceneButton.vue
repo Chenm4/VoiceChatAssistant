@@ -1,10 +1,10 @@
 <template>
   <button ref="button" type="button" class="scene-button" :class="{ selected, floating: position }"
     :style="position ? { left: position.left + 'px', top: position.top + 'px' } : {}"
-    :aria-pressed="selected" :aria-disabled="disabled" :title="`${scene.description || scene.name}（拖动调整位置，右键复位）`"
+    :aria-pressed="selected" :aria-disabled="disabled"
     @pointerdown="start" @pointermove="move" @pointerup="end" @pointercancel="cancel"
-    @click="click" @contextmenu.prevent="reset">
-    <strong>{{ scene.name }}</strong><small v-if="scene.description">{{ scene.description }}</small>
+    @click="click">
+    <strong>{{ scene.name }}</strong>
   </button>
 </template>
 <script setup>
@@ -53,7 +53,8 @@ onUnmounted(() => { window.removeEventListener('resize', resize); window.removeE
 </script>
 <style scoped>
 .scene-button { display:flex; flex-direction:column; align-items:flex-start; gap:1px; max-width:220px; padding:4px 9px; border:1px solid #d8dfe9; border-radius:12px; color:#475569; background:#fff; cursor:grab; touch-action:none; user-select:none; text-align:left; }
-.scene-button small { font-size:11px; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.scene-button small { display:none; font-size:11px; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.scene-button strong { font-size:13px; line-height:22px; white-space:nowrap; }
 .scene-button.selected { background:#eef2ff; border-color:#818cf8; color:#4338ca; }
 .scene-button.floating { position:fixed; z-index:1100; box-shadow:0 3px 12px #0f172a26; }
 .scene-button[aria-disabled=true] { opacity:.6; }

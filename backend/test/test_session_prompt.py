@@ -46,6 +46,10 @@ class SessionPromptTests(unittest.TestCase):
         self.assertEqual(config.system_prompt, "新规则")
         self.assertEqual(config.user_prompt_template, "面试题：{{question}}")
         self.assertEqual(config.background_mode, "shared")
+        self.assertEqual(config.source_name, '通义千问')
+        self.assertEqual(config.models, ['qwen3.8-max', 'qwen3.7-plus'])
+        self.assertEqual([(target.model, target.reasoning_effort) for target in config.model_targets],
+                         [('qwen3.8-max', 'none'), ('qwen3.7-plus', 'low')])
 
     def test_shared_background_is_read_live_but_legacy_adds_nothing(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -126,7 +130,9 @@ class AnswerHighlightPromptTests(unittest.TestCase):
         from backend.api.models import PromptScene
         config = SessionConfig(system_prompt='规则', answer_highlight_enabled=True,
                                active_scene=PromptScene(id='test', name='测试'))
-        self.assertTrue(session_prompt.compose_session_system_prompt(make_session(config)).endswith(session_prompt.ANSWER_HIGHLIGHT_PROMPT))
+        prompt = session_prompt.compose_session_system_prompt(make_session(config))
+        self.assertIn(session_prompt.ANSWER_HIGHLIGHT_PROMPT, prompt)
+        self.assertLess(prompt.index(session_prompt.ANSWER_HIGHLIGHT_PROMPT), prompt.index('【当前场景】'))
 
 
 if __name__ == "__main__":

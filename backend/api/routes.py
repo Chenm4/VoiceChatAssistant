@@ -3,6 +3,7 @@ API 路由定义
 """
 
 import asyncio
+import anyio
 import base64
 import hashlib
 import io
@@ -234,17 +235,13 @@ def resolve_chat_context_config(session_config: Optional[SessionConfig]) -> Dict
     settings = {
         "max_history_turns": CHAT_CONTEXT_CONFIG.get("max_history_turns", 15),
         "max_history_chars": CHAT_CONTEXT_CONFIG.get("max_history_chars", 12000),
-        "include_assistant_history": CHAT_CONTEXT_CONFIG.get(
-            "include_assistant_history", False
-        ),
+        "include_assistant_history": False,
     }
     if session_config is not None:
         if session_config.max_history_turns is not None:
             settings["max_history_turns"] = session_config.max_history_turns
         if session_config.max_history_chars is not None:
             settings["max_history_chars"] = session_config.max_history_chars
-        if session_config.include_assistant_history is not None:
-            settings["include_assistant_history"] = session_config.include_assistant_history
     return settings
 
 
@@ -425,6 +422,31 @@ async def iterate_provider_stream(stream):
         close = getattr(stream, "close", None)
         if close:
             await asyncio.to_thread(close)
+
+
+async def close_async_provider(stream, client):
+    # A disconnected SSE request has a cancelled scope; shield network cleanup.
+    with anyio.move_on_after(3, shield=True):
+        for resource in (stream, client):
+            if resource is not None:
+                try:
+                    await resource.close()
+                except Exception as error:
+                    logger.warning(f"关闭模型流失败: {error}")
+
+
+def provider_reasoning_text(delta) -> str:
+    """Read only provider-returned public reasoning text; skip opaque blocks."""
+    for field in ('reasoning_content', 'reasoning'):
+        value = getattr(delta, field, None)
+        if isinstance(value, str) and value:
+            return value
+    details = getattr(delta, 'reasoning_details', None)
+    if isinstance(details, list):
+        return ''.join(item.get('text', '') for item in details
+                       if isinstance(item, dict) and item.get('type') == 'reasoning.text'
+                       and isinstance(item.get('text'), str))
+    return ''
 
 
 def get_chat_completion_extra_params(
@@ -633,21 +655,11 @@ def load_initial_state():
 
 def get_current_session() -> Session:
     """
-    获取当前活动会话（带缓存机制）
-    
-    优先从内存缓存读取，缓存失效时从磁盘加载
-    如果会话不存在，自动创建新会话
-    
-    Returns:
-        Session: 当前会话对象
+    Always load the latest version before mutating a session. Chat streams and
+    recording updates save independently, so the memory cache can be stale.
     """
     global current_session_cache
-    
-    # 缓存命中：直接返回
-    if current_session_cache and current_session_cache.id == current_session_id:
-        return current_session_cache
-    
-    # 缓存未命中：从磁盘加载
+
     session = session_storage.load_session(current_session_id)
     
     if not session:
@@ -786,11 +798,9 @@ def attach_recording_to_session(session_id: Optional[str], audio_file: Optional[
         logger.warning(f"忽略 voices 目录之外的录音文件: {audio_path}")
         return
 
-    session = (
-        current_session_cache
-        if current_session_cache and current_session_cache.id == session_id
-        else session_storage.load_session(session_id)
-    )
+    # An answer may have been saved since the cached session was read. Merge
+    # the WAV into the disk version to avoid erasing newer messages.
+    session = session_storage.load_session(session_id)
     if not session:
         logger.warning(f"录音对应的会话不存在: {session_id}")
         return
@@ -831,6 +841,7 @@ if api_config.api_key:
 # 预热流式识别实例（应用启动时）
 try:
     streaming_asr_pool = StreamingASR(preload=True)
+    streaming_asr_pool.prepare_audio_processing()
     logger.info("🔥 [预热成功] 流式识别实例已预热，首次录音将更快启动")
 except Exception as e:
     logger.warning(f"⚠️ [预热失败] 流式识别预热失败: {e}")
@@ -844,7 +855,10 @@ async def preheat_next_instance():
         await asyncio.sleep(0.5)
         
         if not streaming_asr_pool:  # 只有池为空时才预热
-            streaming_asr_pool = StreamingASR(preload=True)
+            next_instance = StreamingASR(preload=True)
+            await asyncio.to_thread(next_instance.prepare_audio_processing)
+            if not streaming_asr_pool:
+                streaming_asr_pool = next_instance
             logger.info("🔥 [预热完成] 下一个流式识别实例已预热")
     except Exception as e:
         logger.warning(f"⚠️ [预热失败] 后台预热失败: {e}")
@@ -1124,6 +1138,12 @@ async def start_recording(request: Optional[RecordingStartRequest] = None):
         temp_asr.session_id = current_session_id
         temp_asr.input_device_index = request.input_device_index if request else None
         temp_asr.requested_device_name = request.input_device_name if request else None
+        if request:
+            temp_asr.mix_inputs = request.mix_inputs
+            temp_asr.input_source = request.input_source
+            temp_asr.keep_other_input_open = request.keep_other_input_open
+            temp_asr.standby_input_device_index = request.standby_input_device_index
+            temp_asr.standby_input_device_name = request.standby_input_device_name
         
         # 启动实时识别（作为后台任务）
         logger.info("🚀 [启动任务] 启动实时识别任务（录音将立即开始）...")
@@ -1132,9 +1152,18 @@ async def start_recording(request: Optional[RecordingStartRequest] = None):
         # 保存 task 引用到实例，以便检查状态
         temp_asr._task = task
         
-        # 短暂等待确保录音已启动（只等待50ms，录音应该已经开始）
+        # Only report success after the selected microphone is actually open.
+        # Device setup runs outside the event loop; ASR networking continues
+        # in the background while captured audio is buffered.
         logger.info("⏳ [等待录音] 等待录音启动...")
-        await asyncio.sleep(0.05)  # 50ms足够启动录音线程
+        try:
+            await temp_asr.wait_until_recording()
+        except Exception:
+            # Device-open errors also finish the background task. Retrieve its
+            # exception before the normal failed-start cleanup below.
+            if task.done() and not task.cancelled():
+                task.exception()
+            raise
         
         # 检查任务是否立即失败
         if task.done() and task.exception():
@@ -1172,6 +1201,17 @@ async def start_recording(request: Optional[RecordingStartRequest] = None):
         return RecordingResponse(success=False, message=str(e))
 
 
+@router.post('/recording/switch-input')
+async def switch_recording_input(request: RecordingStartRequest):
+    if not streaming_asr or not streaming_asr.is_recording:
+        raise HTTPException(status_code=409, detail='当前未在识别')
+    try:
+        device = await streaming_asr.switch_input(request.input_device_index, request.input_device_name, request.input_source, mix_inputs=request.mix_inputs)
+        return {'success': True, 'input_source': request.input_source, 'input_device_name': device['name']}
+    except Exception as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+
 @router.get("/recording/status")
 async def get_recording_status():
     """获取录音状态"""
@@ -1196,6 +1236,7 @@ async def get_recording_status():
             else 0.0
         ),
         "input_device_name": streaming_asr.input_device_name,
+        "input_source": getattr(streaming_asr, 'input_source', 'microphone'),
         "error": streaming_asr.error_message,
         "capture_warning": (
             f'麦克风「{streaming_asr.input_device_name}」尚未采集到声音，请检查设备、静音和麦克风权限'
@@ -1214,7 +1255,7 @@ async def get_recording_status():
 
 
 @router.post("/recording/stop")
-async def stop_recording():
+async def stop_recording(finalize: bool = True):
     """停止录音并获取识别结果 - 实时流式模式"""
     global streaming_asr
     
@@ -1236,7 +1277,7 @@ async def stop_recording():
         logger.info("🛑 [停止识别] 调用 stop_streaming()...")
         stop_start = time.time()
         
-        text, error_msg = await current_asr.stop_streaming()
+        text, error_msg = await current_asr.stop_streaming() if finalize else await current_asr.stop_streaming(finalize=False)
         attach_recording_to_session(
             getattr(current_asr, "session_id", None),
             current_asr.saved_audio_file,
@@ -1248,7 +1289,7 @@ async def stop_recording():
         if text:
             logger.info(f"✅ [识别成功] 文本: \"{text}\" (停止耗时: {stop_elapsed:.2f}ms, 总耗时: {total_elapsed:.2f}ms)")
             logger.info(f"📈 [耗时统计] 停止识别: {stop_elapsed:.2f}ms | 总计: {total_elapsed:.2f}ms")
-            return RecordingResponse(success=True, text=text)
+            return RecordingResponse(success=True, text=text, audio_file=Path(current_asr.saved_audio_file).name if current_asr.saved_audio_file else None)
         else:
             detailed_message = error_msg or "识别失败，请确保说话清晰且时长足够"
             logger.warning(f"❌ [识别失败] {detailed_message} (总耗时: {total_elapsed:.2f}ms)")
@@ -1537,6 +1578,7 @@ async def chat(request: ChatRequest):
                     await asyncio.sleep(0)
                     model_results[model_index] = {
                         'content': '',
+                        'reasoning_content': '',
                         'start_time': time.time(),
                         'model': model_name,
                         'model_key': target['key'],
@@ -1553,6 +1595,8 @@ async def chat(request: ChatRequest):
                 async def stream_model(model_index: int, target: Dict[str, Any]):
                     model_name = target['model']
                     source = target['source']
+                    client = None
+                    stream = None
                     try:
                         # 为当前模型构建专属的消息历史
                         model_messages = build_messages_for_model(
@@ -1596,6 +1640,13 @@ async def chat(request: ChatRequest):
                         async for chunk in stream:
                             if not chunk.choices:
                                 continue
+                            reasoning = provider_reasoning_text(chunk.choices[0].delta)
+                            if reasoning:
+                                model_results[model_index]['reasoning_content'] += reasoning
+                                await chunk_queue.put({
+                                    'type': 'reasoning', 'model_index': model_index,
+                                    'model_key': target['key'], 'data': reasoning,
+                                })
                             content = chunk.choices[0].delta.content
                             if content:
                                 model_results[model_index]['content'] += content
@@ -1634,6 +1685,8 @@ async def chat(request: ChatRequest):
                             'source_name': target['source_name'],
                             'message': str(e)
                         })
+                    finally:
+                        await close_async_provider(stream, client)
                 
                 # 启动所有模型的并行任务
                 tasks = []
@@ -1672,6 +1725,7 @@ async def chat(request: ChatRequest):
                             'source_name': result['source_name'],
                             'reasoning_effort': result['reasoning_effort'],
                             'content': result['content'],
+                            'reasoning_content': result['reasoning_content'],
                             'latency_ms': int((time.time() - result['start_time']) * 1000)
                         })
                 
@@ -1689,6 +1743,7 @@ async def chat(request: ChatRequest):
                         "model_key": model_data['model_key'],
                         "source_name": model_data['source_name'],
                         "content": model_data['content'],
+                        "reasoning_content": model_data['reasoning_content'],
                         "latency_ms": model_data['latency_ms'],
                         "model_info": {
                             "id": model_data['model_key'],
@@ -1770,12 +1825,17 @@ async def chat(request: ChatRequest):
                 stream = await asyncio.to_thread(client.chat.completions.create, **request_params)
                 
                 assistant_message = ''
+                assistant_reasoning = ''
                 chunk_count = 0
                 last_log_time = time.time()
                 
                 async for chunk in iterate_provider_stream(stream):
                     if not chunk.choices:
                         continue
+                    reasoning = provider_reasoning_text(chunk.choices[0].delta)
+                    if reasoning:
+                        assistant_reasoning += reasoning
+                        yield f"data: {json.dumps({'type': 'reasoning', 'data': reasoning}, ensure_ascii=False)}\n\n"
                     content = chunk.choices[0].delta.content
                     if content:
                         assistant_message += content
@@ -1819,6 +1879,7 @@ async def chat(request: ChatRequest):
                     role="assistant",
                     scene_name=session_config.active_scene.name if session_config and session_config.active_scene else None,
                     content=assistant_message,
+                    reasoning_content=assistant_reasoning,
                     type="text",
                     created_at=assistant_msg_time,
                     children_ids=[],
@@ -1872,6 +1933,7 @@ async def chat(request: ChatRequest):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
+            "X-User-Message-Id": user_msg_id,
             "X-Accel-Buffering": "no"  # 禁用 Nginx 缓冲
         }
     )
@@ -1888,6 +1950,13 @@ def build_message_path(session: Session, target_msg_id: str) -> List[ChatMessage
     Returns:
         List[ChatMessage]: 消息路径（按时间顺序）
     """
+    # Older flat sessions have no parent ID on user questions. Preserve their
+    # ordered prefix when rerunning a question, without including future turns.
+    if all(not msg.parent_id for msg in session.messages if msg.role == 'user'):
+        for index, message in enumerate(session.messages):
+            if message.id == target_msg_id:
+                return [msg for msg in session.messages[:index + 1] if msg.role != 'system']
+        return []
     # 创建消息字典方便查找
     msg_dict = {msg.id: msg for msg in session.messages}
     
@@ -2323,7 +2392,25 @@ async def update_message(session_id: str, message_id: str, request: MessageUpdat
                 existing = {attachment.id: attachment for attachment in msg.attachments}
                 msg.attachments = [existing.get(attachment.id, attachment) for attachment in replacement_attachments]
                 msg.type = "image" if replacement_attachments else "text"
-            msg.content = request.content
+            if request.model_key is not None:
+                if msg.role != "assistant" or not msg.parallel_models:
+                    raise HTTPException(status_code=400, detail="此消息没有并行模型回答")
+                def entry_key(item):
+                    info = item.get("model_info") or {}
+                    explicit = item.get("model_key") or info.get("id")
+                    if explicit:
+                        return explicit
+                    source = info.get("provider") or item.get("source_name")
+                    name = info.get("name") or item.get("model") or ""
+                    return f"{source}::{name}" if source and source != "unknown" else name
+
+                entry = next((item for item in msg.parallel_models
+                              if entry_key(item) == request.model_key), None)
+                if entry is None:
+                    raise HTTPException(status_code=404, detail="找不到对应模型回答")
+                entry["content"] = request.content
+            else:
+                msg.content = request.content
             msg.created_at = int(time.time())  # 更新时间戳
             message_found = True
             break
@@ -2927,6 +3014,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                     await asyncio.sleep(0)
                     model_results[model_index] = {
                         'content': '',
+                        'reasoning_content': '',
                         'start_time': time.time(),
                         'model': model_name,
                         'model_key': target['key'],
@@ -2939,6 +3027,8 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                 async def stream_model(model_index: int, target: Dict[str, Any]):
                     model_name = target['model']
                     source = target['source']
+                    client = None
+                    stream = None
                     try:
                         # 为当前模型构建专属的消息历史
                         model_messages = build_messages_for_model_regenerate(
@@ -2983,6 +3073,13 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                         async for chunk in stream:
                             if not chunk.choices:
                                 continue
+                            reasoning = provider_reasoning_text(chunk.choices[0].delta)
+                            if reasoning:
+                                model_results[model_index]['reasoning_content'] += reasoning
+                                await chunk_queue.put({
+                                    'type': 'reasoning', 'model_index': model_index,
+                                    'model_key': target['key'], 'data': reasoning,
+                                })
                             content = chunk.choices[0].delta.content
                             if content:
                                 model_results[model_index]['content'] += content
@@ -3019,6 +3116,8 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                             'source_name': target['source_name'],
                             'message': str(e)
                         })
+                    finally:
+                        await close_async_provider(stream, client)
                 
                 tasks = []
                 for model_index, target in enumerate(model_targets):
@@ -3049,6 +3148,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                             'source_name': result['source_name'],
                             'reasoning_effort': result['reasoning_effort'],
                             'content': result['content'],
+                            'reasoning_content': result['reasoning_content'],
                             'latency_ms': int((time.time() - result['start_time']) * 1000)
                         })
                 
@@ -3063,6 +3163,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                         "model_key": model_data['model_key'],
                         "source_name": model_data['source_name'],
                         "content": model_data['content'],
+                        "reasoning_content": model_data['reasoning_content'],
                         "latency_ms": model_data['latency_ms'],
                         "model_info": {
                             "id": model_data['model_key'],
@@ -3160,14 +3261,21 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                 )
                 request_preview = log_provider_request(source_to_use, request_params)
                 yield f"data: {json.dumps({'type': 'provider_request', 'stage': 'regenerate', 'model_key': target['key'], 'request': request_preview}, ensure_ascii=False)}\n\n"
+                if targeted_rerun:
+                    yield f"data: {json.dumps({'type': 'targeted_start', 'message_id': existing_assistant.id, 'model_key': target['key'], 'reasoning_effort': target['reasoning_effort']}, ensure_ascii=False)}\n\n"
                 stream = await asyncio.to_thread(client.chat.completions.create, **request_params)
                 
                 assistant_message = ''
+                assistant_reasoning = ''
                 chunk_count = 0
                 
                 async for chunk in iterate_provider_stream(stream):
                     if not chunk.choices:
                         continue
+                    reasoning = provider_reasoning_text(chunk.choices[0].delta)
+                    if reasoning:
+                        assistant_reasoning += reasoning
+                        yield f"data: {json.dumps({'type': 'reasoning', 'data': reasoning}, ensure_ascii=False)}\n\n"
                     content = chunk.choices[0].delta.content
                     if content:
                         assistant_message += content
@@ -3183,10 +3291,12 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                 if targeted_rerun:
                     if existing_model_entry is not None:
                         existing_model_entry["content"] = assistant_message
+                        existing_model_entry["reasoning_content"] = assistant_reasoning
                         existing_model_entry["latency_ms"] = latency_ms
                         existing_model_entry.setdefault("model_info", {})["reasoning_effort"] = target['reasoning_effort']
                     else:
                         existing_assistant.content = assistant_message
+                        existing_assistant.reasoning_content = assistant_reasoning
                         existing_assistant.latency_ms = latency_ms
                         existing_assistant.model_info.reasoning_effort = target['reasoning_effort']
                     session.updated_at = int(time.time())
@@ -3214,6 +3324,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                     role="assistant",
                     scene_name=session_config.active_scene.name if session_config and session_config.active_scene else None,
                     content=assistant_message,
+                    reasoning_content=assistant_reasoning,
                     type="text",
                     created_at=assistant_msg_time,
                     children_ids=[],

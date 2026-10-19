@@ -37,3 +37,61 @@ test('parallel model slots stay in card order even when only the right model com
   assert.equal(models[1].answers[0].answer, 'B')
   assert.deepEqual(answerHighlightModels({ parallel_models: message.models }), models)
 })
+
+test('history navigation keeps messages separate and aligns parallel answers by number', async () => {
+  const { answerHighlightPages } = await import('../src/utils/answerHighlight.js')
+  const answer = (question, value = 'A') => ({ question, type: 'choice', answer: value })
+  const messages = [
+    { role: 'user', content: '题目' },
+    { id: 'first', role: 'assistant', content: wrap([answer('1'), answer('2')]) },
+    { role: 'assistant', models: [
+      { content: wrap([answer('2'), answer('3')]) },
+      { content: wrap([answer('3', 'B'), answer('2', 'C'), answer('4')]) }
+    ] },
+    { role: 'user', content: '新题目' }
+  ]
+  const pages = answerHighlightPages(messages)
+  assert.deepEqual(pages.map(page => page.question), ['1', '2', '2', '3', '4'])
+  assert.deepEqual(pages.map(page => page.messageIndex), [1, 1, 2, 2, 2])
+  assert.equal(new Set(pages.map(page => page.key)).size, 5)
+  assert.deepEqual(pages[2].models.map(model => model.answers[0].answer), ['A', 'C'])
+  assert.deepEqual(pages[4].models[0].answers, [])
+})
+
+test('late models preserve question keys; streaming and malformed answers are excluded', async () => {
+  const { answerHighlightPages } = await import('../src/utils/answerHighlight.js')
+  const right = { content: wrap([{ question: '12', type: 'choice', answer: 'B' }]) }
+  const left = { content: right.content, is_streaming: true }
+  const messages = [{ id: 'reply', role: 'assistant', models: [left, right] }]
+  const before = answerHighlightPages(messages)
+  assert.deepEqual(before[0].models[0].answers, [])
+  left.is_streaming = false
+  assert.equal(answerHighlightPages(messages)[0].key, before[0].key)
+  assert.equal(answerHighlightPages(messages)[0].models[0].answers[0].answer, 'B')
+  assert.deepEqual(answerHighlightPages([{ role: 'assistant', content: 'invalid' }]), [])
+})
+
+test('unnumbered and repeated question numbers remain individually reachable', async () => {
+  const { answerHighlightPages } = await import('../src/utils/answerHighlight.js')
+  const answers = ['', '', '1', '1'].map(question => ({ question, type: 'boolean', answer: '对' }))
+  const pages = answerHighlightPages([{ role: 'assistant', content: wrap(answers) }])
+  assert.equal(pages.length, 4)
+  assert.equal(new Set(pages.map(page => page.key)).size, 4)
+})
+
+test('both model codes automatically share a page, including ordinary code fences', async () => {
+  const { answerHighlightPages } = await import('../src/utils/answerHighlight.js')
+  const json = '```json\n' + JSON.stringify({ algorithm_answer: { language: 'java', code: 'class Main {}' } }) + '\n```'
+  const messages = [{ id: 'code', role: 'assistant', models: [
+    { model_key: 'left', content: json },
+    { model_key: 'right', content: '```java\nclass Other {}\n```' }
+  ] }]
+  const [page] = answerHighlightPages(messages)
+  assert.equal(page.type, 'code')
+  assert.deepEqual(page.models.map(model => model.code.code), ['class Main {}', 'class Other {}'])
+  messages[0].models[1].content = ''
+  const [pending] = answerHighlightPages(messages)
+  assert.equal(pending.models.length, 2)
+  assert.equal(pending.models[1].code, null)
+  assert.equal(pending.key, page.key)
+})

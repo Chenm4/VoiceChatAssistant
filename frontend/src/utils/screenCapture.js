@@ -1,18 +1,18 @@
 const MAX_CAPTURE_EDGE = 2200
 
-function waitForVideo(video) {
+export function waitForVideo(video) {
   if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth) {
     return Promise.resolve()
   }
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('等待共享画面超时')), 8000)
+    const timeout = setTimeout(() => reject(new Error('等待画面超时')), 8000)
     video.addEventListener('loadeddata', () => {
       clearTimeout(timeout)
       resolve()
     }, { once: true })
     video.addEventListener('error', () => {
       clearTimeout(timeout)
-      reject(new Error('无法读取共享画面'))
+      reject(new Error('无法读取画面'))
     }, { once: true })
   })
 }
@@ -83,7 +83,7 @@ export class DisplayScreenCapture {
 
   async capture() {
     if (!this.connected || !this.video) {
-      throw new Error('请先选择要截图的窗口或标签页')
+      throw new Error('请先连接摄像头或选择截图窗口')
     }
     await waitForVideo(this.video)
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))

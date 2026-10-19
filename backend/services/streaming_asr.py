@@ -12,6 +12,7 @@
 
 import asyncio
 import audioop
+import queue
 import sys
 import threading
 import time
@@ -26,9 +27,21 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from backend.utils.logger import get_asr_logger
 from backend.services.noise_suppression import create_noise_suppressor
+from backend.services.audio_level import AudioLevelMeter
 from backend.services.volcengine_streaming import VolcengineStreamingClient
 from backend.services.soniox_streaming import SonioxStreamingClient
 from config import AUDIO_CONFIG, ASR_CONFIG, SONIOX_CONFIG, VOLCENGINE_CONFIG
+
+
+
+_connection_cleanup_tasks = set()
+
+
+def mix_pcm16(first: bytes, second: bytes) -> bytes:
+    """Equal-gain mixing with headroom; preserve the input frame count."""
+    if len(first) != len(second):
+        raise ValueError('PCM blocks must have equal lengths')
+    return audioop.add(audioop.mul(first, 2, 0.5), audioop.mul(second, 2, 0.5), 2)
 
 
 class StreamingASR:
@@ -116,6 +129,23 @@ class StreamingASR:
         self.processed_peak = 0
         self.audio_level = 0.0
         self.last_audio_at = 0.0
+        self._noise_suppressor = None
+        self._audio_processing_ready = False
+        self._capture_ready: Optional[asyncio.Event] = None
+        self._input_streams = {}
+        self._capture_threads = []
+        self._active_device_index = None
+        self._capture_lock = threading.Lock()
+        self._device_open_lock = threading.Lock()
+        self._pending_audio = b''
+        self._capture_end_sent = False
+        self.mix_inputs = False
+        self._input_frames = {}
+        self.keep_other_input_open = False
+        self.standby_input_device_index = None
+        self.standby_input_device_name = None
+        self.input_source = 'microphone'
+        self.input_errors = {}
 
         if preload:
             self.logger.info(
@@ -135,6 +165,22 @@ class StreamingASR:
                 f"每段参数: {self.frames_per_segment}帧, "
                 f"{self.bytes_per_segment}字节"
             )
+
+    def prepare_audio_processing(self):
+        """Load dependencies and a fresh filter without opening a microphone."""
+        if not self._audio_processing_ready:
+            self._noise_suppressor = create_noise_suppressor(
+                self.RATE, self.CHANNELS, self.logger
+            )
+            self._audio_processing_ready = True
+
+    async def wait_until_recording(self):
+        """Wait for the actual device-open result, not an assumed 50 ms delay."""
+        if self._capture_ready is None:
+            self._capture_ready = asyncio.Event()
+        await self._capture_ready.wait()
+        if self.error_message:
+            raise RuntimeError(self.error_message)
     
     async def start_streaming(self):
         """
@@ -145,6 +191,8 @@ class StreamingASR:
         4. 标记连接就绪，开始发送缓冲的音频
         """
         start_time = time.time()
+        if self._capture_ready is None:
+            self._capture_ready = asyncio.Event()
         self.logger.info("=" * 80)
         if self.preloaded:
             self.logger.info("🚀 [实时识别] 开始启动（预热实例，加速启动）...")
@@ -167,8 +215,10 @@ class StreamingASR:
             self.logger.info("🎤 [立即启动录音] 开始录音线程（同时建立连接）...")
             
             self.is_recording = True
-            self.recording_start_time = time.time()  # 记录开始时间
-            self._start_audio_capture()
+            # CoreAudio/PortAudio can take seconds on a cold device. Keep the
+            # API event loop responsive while the worker opens the microphone.
+            await asyncio.to_thread(self._start_audio_capture)
+            self._capture_ready.set()
             
             record_elapsed = (time.time() - record_start) * 1000
             self.logger.info(f"✅ [录音已启动] 耗时: {record_elapsed:.2f}ms (音频正在缓冲)")
@@ -256,139 +306,175 @@ class StreamingASR:
             self.logger.error(f"❌ [启动失败] 耗时: {total_elapsed:.2f}ms - {e}", exc_info=True)
             self.error_message = f"启动实时识别失败: {str(e)}"
             self.is_recording = False
+            self._capture_ready.set()
             raise
     
-    def _start_audio_capture(self):
-        """启动音频捕获线程（打开麦克风）"""
+    def _resolve_input_device(self, index, name):
+        if index is None and not name:
+            return self.p.get_default_input_device_info()
         try:
-            noise_suppressor = create_noise_suppressor(self.RATE, self.CHANNELS, self.logger)
-            if self.p:
-                self.p.terminate()
-            self.p = pyaudio.PyAudio()
-            if self.input_device_index is None:
-                device = self.p.get_default_input_device_info()
-            else:
-                try:
-                    device = self.p.get_device_info_by_index(self.input_device_index)
-                except (OSError, ValueError):
-                    device = None
-                if device is None or device['maxInputChannels'] <= 0 or (
-                    self.requested_device_name and device['name'] != self.requested_device_name
-                ):
-                    # PortAudio indices change after hotplug. Recover only an
-                    # unambiguous name match, never silently use a different mic.
-                    matches = []
-                    if self.requested_device_name:
-                        for index in range(self.p.get_device_count()):
-                            info = self.p.get_device_info_by_index(index)
-                            if info['maxInputChannels'] > 0 and info['name'] == self.requested_device_name:
-                                matches.append(info)
-                    if len(matches) != 1:
-                        raise ValueError('所选麦克风已不可用，请刷新列表并重新选择')
-                    device = matches[0]
+            device = self.p.get_device_info_by_index(index) if index is not None else None
+        except (OSError, ValueError):
+            device = None
+        if device is not None and device['maxInputChannels'] > 0 and (not name or device['name'] == name):
+            return device
+        matches = [self.p.get_device_info_by_index(i) for i in range(self.p.get_device_count())]
+        matches = [device for device in matches if device['maxInputChannels'] > 0 and name and device['name'] == name]
+        if len(matches) != 1:
+            raise ValueError('所选麦克风已不可用，请刷新列表并重新选择')
+        return matches[0]
+
+    def _open_input(self, index, name, activate=False):
+        with self._device_open_lock:
+            device = self._resolve_input_device(index, name)
+            device_index = int(device['index'])
+            if device_index in self.input_errors and device_index in self._input_streams:
+                self._input_streams.pop(device_index).close()
+                self.input_errors.pop(device_index, None)
+            if device_index not in self._input_streams:
+                stream = self.p.open(format=self.FORMAT, channels=self.CHANNELS, rate=self.RATE,
+                    input=True, input_device_index=device_index, frames_per_buffer=self.CHUNK)
+                self._input_streams[device_index] = stream
+                self._input_frames[device_index] = queue.Queue(maxsize=2)
+                thread = threading.Thread(target=self._capture_input, args=(device_index, stream), daemon=True)
+                self._capture_threads.append(thread)
+                if activate:
+                    self._activate_input(device, stream)
+                thread.start()
+            elif activate:
+                self._activate_input(device, self._input_streams[device_index])
+            return device
+
+    def _activate_input(self, device, stream):
+        with self._capture_lock:
+            self._active_device_index = int(device['index'])
+            self.input_device_index = int(device['index'])
             self.input_device_name = device['name']
-            self.raw_peak = self.processed_peak = 0
+            self.stream = stream
             self.audio_level = 0.0
             self.last_audio_at = 0.0
-            self.logger.info("🎤 当前输入设备: %s (index=%s)", self.input_device_name, device['index'])
 
-            # 打开音频流（真正打开麦克风）
-            self.stream = self.p.open(
-                format=self.FORMAT,
-                channels=self.CHANNELS,
-                rate=self.RATE,
-                input=True,
-                input_device_index=int(device['index']),
-                frames_per_buffer=self.CHUNK
-            )
-            self.logger.info("🎤 [音频设备] 麦克风已打开")
-            
-            def capture_audio():
-                nonlocal noise_suppressor
-                buffer = b''
-                chunk_count = 0
-                
-                self.logger.info("🎙️ [音频捕获] 开始捕获音频数据...")
-                self.logger.info(f"⏱️ [时长限制] 最大录音时长: {self.max_duration_seconds}秒 ({self.max_duration_seconds/60:.1f}分钟)")
-                
-                while self.is_recording:
-                    try:
-                        # 检查是否超过最大录音时长
-                        if self.recording_start_time:
-                            elapsed_time = time.time() - self.recording_start_time
-                            if elapsed_time >= self.max_duration_seconds:
-                                self.logger.warning(f"⏰ [超时自动停止] 录音时长已达到上限 {self.max_duration_seconds}秒，自动停止")
-                                self.auto_stopped = True
-                                self.is_recording = False
-                                break
-                        
-                        # 读取音频数据
-                        data = self.stream.read(self.CHUNK, exception_on_overflow=False)
-                        if not data:
-                            raise OSError('麦克风未返回音频数据')
-                        self.raw_peak = max(self.raw_peak, audioop.max(data, 2))
-                        # Short-window RMS, not the lifetime peak: silence must
-                        # bring the UI meter back down after speech ends.
-                        self.audio_level = min(1.0, (audioop.rms(data, 2) / 32768.0) ** 0.5 * 3)
-                        self.last_audio_at = time.monotonic()
-                        if noise_suppressor is not None:
+    async def switch_input(self, index, name, source, mix_inputs=False):
+        if not self.is_recording:
+            raise ValueError('当前未在识别，请先开始录音')
+        device = await asyncio.to_thread(self._open_input, index, name, True)
+        with self._capture_lock:
+            self.mix_inputs = mix_inputs
+            self.input_source = source
+            for frames in self._input_frames.values():
+                while not frames.empty():
+                    try: frames.get_nowait()
+                    except queue.Empty: break
+        return device
+
+    def _start_audio_capture(self):
+        self.prepare_audio_processing()
+        if self.p:
+            self.p.terminate()
+        self.p = pyaudio.PyAudio()
+        self.recording_start_time = time.time()
+        self.raw_peak = self.processed_peak = 0
+        self._open_input(self.input_device_index, self.requested_device_name, True)
+        self.capture_thread = self._capture_threads[0]
+        if self.keep_other_input_open or self.mix_inputs:
+            try:
+                self._open_input(self.standby_input_device_index, self.standby_input_device_name)
+            except Exception as error:
+                if self.mix_inputs:
+                    raise ValueError(f'混音的第二路输入无法打开: {error}') from error
+                # An unavailable standby must not interrupt the selected input.
+                self.logger.warning('备用录音设备未打开: %s', error)
+
+    def _capture_input(self, device_index, stream):
+        level_meter = AudioLevelMeter(self.RATE, self.CHANNELS)
+        while self.is_recording:
+            try:
+                if self.recording_start_time and time.time() - self.recording_start_time >= self.max_duration_seconds:
+                    self.auto_stopped = True
+                    self.is_recording = False
+                    break
+                data = stream.read(self.CHUNK, exception_on_overflow=False)
+                if not data:
+                    raise OSError('麦克风未返回音频数据')
+                # The selected device is the clock: one output block per input
+                # block, never concatenate two sources into twice the duration.
+                if device_index != self._active_device_index:
+                    if self.mix_inputs:
+                        frames = self._input_frames[device_index]
+                        try: frames.put_nowait((time.monotonic(), data))
+                        except queue.Full:
+                            try: frames.get_nowait()
+                            except queue.Empty: pass
+                            frames.put_nowait((time.monotonic(), data))
+                    continue
+                other_data = None
+                if self.mix_inputs:
+                    others = [index for index in self._input_frames if index != device_index]
+                    if others:
+                        frames = self._input_frames[others[0]]
+                        # Bound skew/latency; a stalled source contributes silence.
+                        deadline = time.monotonic() + self.CHUNK / self.RATE
+                        while time.monotonic() < deadline:
                             try:
-                                data = noise_suppressor.process(data)
-                            except Exception as exc:
-                                self.logger.warning("麦克风降噪失败，后续使用原始音频: %s", exc)
-                                noise_suppressor = None
-                        self.processed_peak = max(self.processed_peak, audioop.max(data, 2))
-                        buffer += data
-                        chunk_count += 1
-                        
-                        # 保存到音频缓冲区（用于生成WAV文件）
-                        self.audio_buffer.append(data)
-                        
-                        # 当累积到一个完整的segment时，放入队列
-                        while len(buffer) >= self.bytes_per_segment:
-                            segment = buffer[:self.bytes_per_segment]
-                            buffer = buffer[self.bytes_per_segment:]
-                            
-                            # 使用线程安全的方式将数据放入异步队列
-                            # 使用保存的事件循环引用
-                            asyncio.run_coroutine_threadsafe(
-                                self.audio_queue.put(segment),
-                                self.loop  # 使用保存的事件循环引用
-                            )
-                            
-                            if chunk_count % 10 == 0:  # 每10个chunk记录一次
-                                self.logger.debug(f"📥 [音频缓冲] 已捕获 {chunk_count} 个chunk, 队列大小: {self.audio_queue.qsize()}")
-                    
-                    except Exception as e:
-                        self.logger.error(f"❌ [音频捕获错误] {e}")
-                        self.error_message = f'麦克风采集失败: {e}'
+                                captured_at, candidate = frames.get(timeout=max(0, deadline - time.monotonic()))
+                            except queue.Empty:
+                                break
+                            if time.monotonic() - captured_at <= 2 * self.CHUNK / self.RATE:
+                                other_data = candidate
+                                break
+                with self._capture_lock:
+                    if device_index != self._active_device_index or self._capture_end_sent:
+                        continue
+                    self.raw_peak = max(self.raw_peak, audioop.max(data, 2))
+                    self.last_audio_at = time.monotonic()
+                    if self._noise_suppressor is not None:
+                        try:
+                            data = self._noise_suppressor.process(data)
+                        except Exception as error:
+                            self.logger.warning('麦克风降噪失败: %s', error)
+                            self._noise_suppressor = None
+                    if self.mix_inputs and len(self._input_streams) > 1:
+                        other_data = (other_data or b'')[:len(data)].ljust(len(data), b'\0')
+                        self.raw_peak = max(self.raw_peak, audioop.max(other_data, 2))
+                        data = mix_pcm16(data, other_data)
+                    self.audio_level = level_meter.update(data)
+                    self.processed_peak = max(self.processed_peak, audioop.max(data, 2))
+                    self.audio_buffer.append(data)
+                    self._pending_audio += data
+                    while len(self._pending_audio) >= self.bytes_per_segment:
+                        segment, self._pending_audio = self._pending_audio[:self.bytes_per_segment], self._pending_audio[self.bytes_per_segment:]
+                        asyncio.run_coroutine_threadsafe(self.audio_queue.put(segment), self.loop)
+            except Exception as error:
+                if not self.is_recording:
+                    break
+                with self._capture_lock:
+                    self.input_errors[device_index] = str(error)
+                    if device_index == self._active_device_index or self.mix_inputs:
+                        self.error_message = f'麦克风采集失败: {error}'
                         self.is_recording = False
                         self.audio_level = 0.0
-                        break
-                
-                # 录音结束，发送剩余数据
-                if buffer:
-                    self.logger.info(f"📦 [最后数据] 发送剩余 {len(buffer)} 字节")
-                    asyncio.run_coroutine_threadsafe(
-                        self.audio_queue.put(buffer),
-                        self.loop  # 使用保存的事件循环引用
-                    )
-                
-                # 发送结束标记
-                asyncio.run_coroutine_threadsafe(
-                    self.audio_queue.put(None),
-                    self.loop  # 使用保存的事件循环引用
-                )
-                
-                self.logger.info(f"🏁 [音频捕获] 音频捕获线程结束，共捕获 {len(self.audio_buffer)} 个数据块")
-            
-            self.capture_thread = threading.Thread(target=capture_audio, daemon=True)
-            self.capture_thread.start()
-            
-        except Exception as e:
-            self.logger.error(f"❌ [音频捕获启动失败] {e}", exc_info=True)
-            raise
-    
+                break
+        if not self.is_recording and device_index == self._active_device_index:
+            self._finish_capture()
+
+    def _finish_capture(self):
+        """Queue the final short block and exactly one EOF, even after device failure.
+
+        Called by the capture worker or stop fallback. The lock also prevents
+        a late device read from appending audio after EOF or after WAV saving.
+        """
+        with self._capture_lock:
+            if self._capture_end_sent:
+                return
+            self._capture_end_sent = True
+            if self.loop is None or self.audio_queue is None:
+                return
+            if self._pending_audio:
+                asyncio.run_coroutine_threadsafe(self.audio_queue.put(self._pending_audio), self.loop)
+                self._pending_audio = b''
+            asyncio.run_coroutine_threadsafe(self.audio_queue.put(None), self.loop)
+            self.logger.info('录音尾包与结束标记已入队')
+
     async def _sender_loop(self):
         """发送循环：从队列获取音频数据并发送（等待连接就绪）"""
         self.logger.info("📤 [发送循环] 启动...")
@@ -546,81 +632,91 @@ class StreamingASR:
             self.logger.error(f"❌ [保存录音失败] {e}", exc_info=True)
             return None
     
-    async def stop_streaming(self):
+    async def _close_asr_connection(self):
+        try:
+            await asyncio.wait_for(self.ws_client.__aexit__(None, None, None), timeout=2.0)
+        except asyncio.TimeoutError:
+            self.logger.warning('ASR 连接关闭超时，保留已识别文字')
+        except Exception as error:
+            self.logger.warning('ASR 连接清理失败: %s', error)
+
+    async def stop_streaming(self, finalize=True):
         """停止实时流式识别"""
         stop_start = time.time()
+        stop_deadline_start = time.monotonic()
         self.logger.info("=" * 80)
         self.logger.info("🛑 [停止识别] 开始停止...")
         self.logger.info("=" * 80)
         
         try:
-            # 1. 停止录音
-            self.logger.info("🎤 [停止录音] 关闭音频流...")
+            # Cancelling keeps the currently recognized draft; submitting waits
+            # for final ASR tokens. Neither path leaves a capture worker running.
             self.is_recording = False
-            
-            if hasattr(self, 'capture_thread'):
-                self.capture_thread.join(timeout=2.0)
-            
-            if self.stream:
-                self.stream.stop_stream()
-                self.stream.close()
-            if self.p:
-                self.p.terminate()
-            
+            if not finalize:
+                self.result_text = self.result_text or self.partial_text
+                asr_task = getattr(self, '_task', None)
+                if asr_task and asr_task is not asyncio.current_task() and not asr_task.done():
+                    asr_task.cancel()
+                    await asyncio.wait({asr_task}, timeout=1)
+            await asyncio.gather(*(asyncio.to_thread(thread.join, 2.0) for thread in self._capture_threads))
+            # Do not rely solely on a device worker to signal EOF: an unplugged
+            # or blocked device may never reach its normal exit path.
+            self._finish_capture()
+            self.logger.info('停止采集阶段耗时: %.2fms', (time.time() - stop_start) * 1000)
+            streams = list(self._input_streams.values()) or ([self.stream] if self.stream else [])
+            def close_inputs():
+                for stream in streams:
+                    try:
+                        stream.stop_stream()
+                    finally:
+                        stream.close()
+                if self.p:
+                    self.p.terminate()
+            await asyncio.wait_for(asyncio.to_thread(close_inputs), timeout=3)
             self.logger.info("✅ [录音已停止]")
-            
+
             # 2. 保存录音文件
             self.logger.info("💾 [保存录音] 正在保存录音文件...")
-            saved_file = self._save_wav_file()
+            saved_file = await asyncio.to_thread(self._save_wav_file)
             if saved_file:
                 self.saved_audio_file = saved_file
                 self.logger.info(f"✅ [录音已保存] 路径: {saved_file}")
             
-            # 3. 等待队列处理完成（最多等待3秒）
-            self.logger.info("⏳ [等待队列] 等待音频数据发送完成...")
-            wait_start = time.time()
-            
-            for _ in range(30):  # 最多等待3秒
-                if self.audio_queue.empty():
-                    break
-                await asyncio.sleep(0.1)
-            
-            wait_elapsed = (time.time() - wait_start) * 1000
-            self.logger.info(f"✅ [队列清空] 耗时: {wait_elapsed:.2f}ms")
-            
-            # 4. 等待发送/接收任务完成，确保 Soniox 的最后响应已经被
-            # 消费后再关闭 WebSocket。旧逻辑只等待 result_text，容易在
-            # 服务端刚返回最后响应前提前关闭连接，造成空结果。
-            self.logger.info("⏳ [等待结果] 等待 ASR 返回最终结果...")
-            result_start = time.time()
-
-            asr_task = getattr(self, '_task', None)
-            if asr_task and asr_task is not asyncio.current_task() and not asr_task.done():
-                try:
-                    await asyncio.wait_for(asyncio.shield(asr_task), timeout=10.0)
-                except asyncio.TimeoutError:
-                    self.logger.warning("⚠️ [等待结果] ASR 任务超过10秒，继续使用当前结果")
-                except Exception as task_error:
-                    self.logger.warning(f"⚠️ [等待结果] ASR 任务结束异常: {task_error}")
-
-            for _ in range(30):  # 任务完成后的短暂状态同步等待
-                if self.result_text or self.error_message:
-                    break
-                await asyncio.sleep(0.1)
-
-            result_elapsed = (time.time() - result_start) * 1000
-            self.logger.info(f"✅ [结果获取] 耗时: {result_elapsed:.2f}ms")
+            if finalize:
+                # The ASR task already awaits both sender and receiver. Queue
+                # emptiness is not delivery confirmation, and polling result_text
+                # after task completion only adds a redundant three-second wait.
+                self.logger.info("⏳ [等待结果] 等待 ASR 返回最终结果...")
+                result_start = time.time()
+                asr_task = getattr(self, '_task', None)
+                if asr_task and asr_task is not asyncio.current_task():
+                    try:
+                        await asyncio.wait_for(asyncio.shield(asr_task), timeout=max(0.0, 1.0 - (time.monotonic() - stop_deadline_start)))
+                    except asyncio.TimeoutError:
+                        self.logger.warning("最终识别等待达到1秒，立即采用当前识别文字")
+                        asr_task.cancel()
+                    except asyncio.CancelledError:
+                        if not asr_task.cancelled():
+                            raise
+                    except Exception as task_error:
+                        self.logger.warning(f"⚠️ [等待结果] ASR 任务结束异常: {task_error}")
+                self.logger.info("✅ [结果获取] 耗时: %.2fms", (time.time() - result_start) * 1000)
 
             # 如果服务端只返回非最终 token，使用最新的实时假设，避免
             # 因网络关闭时序导致空结果。
             if not self.result_text and self.partial_text and not self.error_message:
                 self.result_text = self.partial_text
             
-            # 5. 关闭 WebSocket 连接
-            self.logger.info("🔌 [关闭连接] 关闭 WebSocket...")
+            # Final text is fixed now. The WebSocket close handshake must not
+            # delay returning it to the composer / language model.
             if self.ws_client:
-                await self.ws_client.__aexit__(None, None, None)
-            
+                if finalize:
+                    cleanup = asyncio.create_task(self._close_asr_connection())
+                    _connection_cleanup_tasks.add(cleanup)
+                    cleanup.add_done_callback(_connection_cleanup_tasks.discard)
+                else:
+                    await self._close_asr_connection()
+
             total_stop_elapsed = (time.time() - stop_start) * 1000
             self.logger.info(f"🏁 [停止完成] 总耗时: {total_stop_elapsed:.2f}ms")
             self.logger.info("=" * 80)

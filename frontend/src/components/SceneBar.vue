@@ -16,17 +16,17 @@
       <button class="quiet" :disabled="disabled || busy || !session?.session_config?.active_scene" @click="selectScene(null)">恢复默认</button>
       <button class="quiet" @click="resetPositions">按钮归位</button>
     </div>
-      <p>系统提示词与会话设置共用。场景要求和项目资料仅附加到本轮用户消息，不写入聊天历史，不随轮数叠加；仍占用本次请求的上下文。保存后立即应用。</p>
+      <p>系统提示词与会话设置共用。当前场景的要求和项目资料追加到系统提示词末尾，不放入用户问题、不随历史轮数叠加。保存后立即应用。</p>
       <label class="field">系统提示词（与会话设置同步）<textarea v-model="draft.common_rules" rows="3" maxlength="30000" /></label>
       <div class="editor-scenes">
         <button v-for="(scene, index) in draft.scenes" :key="scene.id" class="quiet" :class="{ active: editIndex === index }" @click="editIndex = index">{{ scene.name || '未命名' }}</button>
         <button class="quiet" :disabled="draft.scenes.length >= 100" @click="addScene">＋ 新场景</button>
       </div>
       <template v-if="editedScene">
+        <label class="field"><span><input type="checkbox" v-model="editedScene.use_scene_rules_as_system" style="width:auto" /> 此场景单独使用下方规则，不沿用会话系统提示词</span></label>
         <label class="field">按钮名称<input v-model="editedScene.name" maxlength="40" placeholder="例如：订单项目" /></label>
-        <label class="field">按钮说明<input v-model="editedScene.description" maxlength="200" placeholder="例如：订单链路、性能优化与技术追问" /></label>
-        <label class="field">场景用户提示词<textarea v-model="editedScene.rules" rows="4" maxlength="30000" placeholder="这个场景下，希望 AI 如何回答" /></label>
-        <label class="field">项目资料（随本轮用户消息发送）<textarea v-model="editedScene.background" rows="7" maxlength="100000" placeholder="粘贴这个项目的背景、职责、技术方案与成果；通用场景可留空" /></label>
+        <label class="field">场景提示词<textarea v-model="editedScene.rules" rows="4" maxlength="30000" placeholder="这个场景下，希望 AI 如何回答" /></label>
+        <label class="field">项目资料（追加到系统提示词末尾）<textarea v-model="editedScene.background" rows="7" maxlength="100000" placeholder="粘贴这个项目的背景、职责、技术方案与成果；通用场景可留空" /></label>
         <button class="quiet danger" @click="removeScene">删除此场景</button>
       </template>
       <template #footer><button class="quiet" @click="editing = false">取消</button><el-button type="primary" :loading="saving" @click="saveCatalog">保存场景</el-button></template>
@@ -100,8 +100,10 @@ function selectScene(scene, force = false, commonRules, shouldRerun = rerun.valu
 </script>
 <style scoped>
 :deep(.el-dialog__body) { max-height:65vh; overflow-y:auto; }
-.scene-bar { padding:0; }
+.scene-bar { padding:0; width:100%; min-width:0; }
 .scene-buttons,.scene-status,.editor-scenes { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.scene-buttons { flex-wrap:nowrap; overflow-x:auto; scrollbar-width:thin; padding:2px 0; }
+.scene-buttons > :deep(*) { flex-shrink:0; }
 .scene-status { margin-top:7px; font-size:12px; color:#64748b; }
 .scene-status label { display:flex; align-items:center; gap:4px; }
 .quiet { padding:5px 8px; background:transparent; border:0; border-radius:6px; color:#64748b; cursor:pointer; }

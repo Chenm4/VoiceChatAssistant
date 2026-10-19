@@ -1,38 +1,57 @@
 <template>
   <button 
     ref="button"
-    :aria-label="isRecording ? '停止录音' : '开始语音输入'"
-    :title="isRecording ? '停止录音' : '开始语音输入（可拖动）'"
+    :aria-label="buttonLabel"
+    :title="buttonLabel + (rightClickAction === 'photo' ? '（右键拍照）' : '（左键默认混音识别，右键声卡单路；同来源再次点击停止）')"
+    :aria-busy="phase !== 'idle'"
     @mousedown="handleMouseDown"
     @touchstart="handleTouchStart"
-    @keydown.enter.prevent="$emit('toggle')"
-    @keydown.space.prevent="$emit('toggle')"
+    @keydown.enter.prevent="phase === 'idle' && $emit('toggle')"
+    @keydown.space.prevent="phase === 'idle' && $emit('toggle')"
     class="voice-button flex items-center justify-center text-white"
-    :class="isRecording ? 'recording' : ''"
-    :style="{ '--volume': audioVolume }"
+    :class="{ recording: isRecording, processing: phase !== 'idle' }"
   >
+    <span class="source-badge">{{ modeLabel }}</span>
     <div class="button-content">
-      <div v-if="isRecording" class="volume-glow" aria-hidden="true"></div>
-      <AppIcon name="microphone" class="text-2xl icon" />
+      <span v-if="['starting', 'stopping', 'switching'].includes(phase)" class="microphone-progress" aria-hidden="true"></span>
+      <svg class="microphone-meter" viewBox="0 0 24 28" aria-hidden="true">
+        <defs>
+          <clipPath :id="meterClipId">
+            <rect x="8" y="2" width="8" height="16" rx="4" />
+          </clipPath>
+        </defs>
+        <rect class="mic-capsule" x="8" y="2" width="8" height="16" rx="4" />
+        <g :clip-path="`url(#${meterClipId})`">
+          <rect class="mic-level" x="8" width="8" :y="18 - audioVolume * 16" :height="audioVolume * 16" />
+        </g>
+        <rect class="mic-outline" x="8" y="2" width="8" height="16" rx="4" />
+        <path class="mic-stand" d="M5 12v4a7 7 0 0 0 14 0v-4M12 23v3M8 26h8" />
+      </svg>
     </div>
     <!-- <div class="tooltip">{{ isRecording ? '停止录音' : '点击录音' }}</div> -->
   </button>
 </template>
 
 <script setup>
-import { ref, computed, onUnmounted } from 'vue'
+import { ref, computed, getCurrentInstance, onUnmounted } from 'vue'
 
 const props = defineProps({
+  rightClickAction: { type: String, default: 'record' },
   isRecording: {
     type: Boolean,
     default: false
   },
-  audioLevel: { type: Number, default: 0 }
+  audioLevel: { type: Number, default: 0 },
+  phase: { type: String, default: 'idle' },
+  inputSource: { type: String, default: 'microphone' },
+  modeLabel: { type: String, default: '双路混音' }
 })
 
 const emit = defineEmits(['toggle'])
+const buttonLabel = computed(() => props.phase === 'starting' ? '正在启动语音识别' : props.phase === 'stopping' ? '正在提交识别结果' : props.phase === 'switching' ? '正在切换输入设备' : props.phase === 'cancelling' ? '正在取消识别' : props.isRecording ? (props.inputSource === 'usb' ? '切换为混音识别' : '停止' + props.modeLabel + '识别') : '开始' + props.modeLabel + '识别')
 
 const button = ref(null)
+const meterClipId = `microphone-level-${getCurrentInstance().uid}`
 const audioVolume = computed(() => props.isRecording ? Math.max(0, Math.min(1, Number(props.audioLevel) || 0)) : 0)
 
 // 拖动相关
@@ -47,6 +66,7 @@ let animationFrameId = null
 
 // 优化的拖动处理
 function handleMouseDown(e) {
+  if (e.button !== 0 || props.phase !== 'idle') return
   e.preventDefault()
   isDragging = false
   startX = e.clientX
@@ -63,6 +83,7 @@ function handleMouseDown(e) {
 }
 
 function handleTouchStart(e) {
+  if (props.phase !== 'idle') return
   const touch = e.touches[0]
   isDragging = false
   startX = touch.clientX
@@ -175,11 +196,16 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.voice-button { position: fixed; right: 30px; bottom: 30px; width: 64px; height: 64px; border-radius: 50%; cursor: move; z-index: 1000; user-select: none; border: 2px solid #d1d5db; background: white; overflow: visible; touch-action: none; }
+.source-badge { position: absolute; bottom: 2px; left: 50%; transform: translateX(-50%); padding: 2px 5px; border-radius: 5px; background: #ffffffe6; color: #555; font-size: 10px; line-height: 1.2; white-space: nowrap; pointer-events: none; }
+.voice-button { position: fixed; right: 30px; bottom: 30px; width: 64px; height: 64px; border-radius: 50%; cursor: move; z-index: 1000; user-select: none; border: 2px solid #d1d5db; background: transparent; overflow: visible; touch-action: none; }
 .voice-button:focus-visible { outline: 3px solid #86efac; outline-offset: 3px; }
+.microphone-progress { position: absolute; inset: -10px; border: 2px solid transparent; border-top-color: #73777e; border-radius: 50%; animation: mic-progress .8s linear infinite; }
+@keyframes mic-progress { to { transform: rotate(360deg); } }
 .button-content { position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
-.icon { position: relative; z-index: 2; color: #6b7280; transition: transform .12s ease, color .12s ease; }
-.recording .icon { transform: scale(calc(1 + var(--volume) * .18)); }
-.volume-glow { position: absolute; width: 42px; height: 42px; border-radius: 50%; background: #22c55e; opacity: calc(var(--volume) * .8); transform: scale(calc(.45 + var(--volume) * .8)); box-shadow: 0 0 calc(var(--volume) * 12px) #22c55e80; transition: transform .12s ease-out, opacity .12s ease-out; pointer-events: none; }
-@media (prefers-reduced-motion: reduce) { .volume-glow, .icon { transition: none; transform: none !important; } }
+.microphone-meter { width: 28px; height: 32px; overflow: visible; }
+.mic-capsule { fill: #edf0f2; }
+.mic-level { fill: #20c66b; transition: y .1s linear, height .1s linear; }
+.mic-outline, .mic-stand { fill: none; stroke: #72777d; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.recording .mic-outline, .recording .mic-stand { stroke: #43494f; }
+@media (prefers-reduced-motion: reduce) { .microphone-progress { animation: none; border-style: dotted; border-color: #73777e; } .mic-level { transition: none; } }
 </style>
