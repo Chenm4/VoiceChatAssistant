@@ -73,17 +73,16 @@ def load_prompt_template_snapshot(
 
 def create_default_session_config() -> SessionConfig:
     """Create the config used only for newly created sessions."""
-    try:
-        prompt = load_prompt_template_snapshot()
-    except ValueError:
-        # A new user has no inherited prompt, background, or model choices.
-        return SessionConfig(source_name=user_state().current_config.current_source,
-                             models=[], model_targets=[], system_prompt='', background_mode='none')
     defaults = user_config('DEFAULT_SESSION_CONFIG') or {
         'source_name': user_state().current_config.current_source,
         'models': [user_state().current_config.current_model] if user_state().current_config.current_model else [],
         'model_targets': [],
     }
+    try:
+        prompt = load_prompt_template_snapshot()
+    except ValueError:
+        # Model defaults are independent of a user's private prompt catalog.
+        return SessionConfig(**defaults, system_prompt='', background_mode='none')
     return SessionConfig(
         **defaults,
         system_prompt=prompt["system_prompt"],

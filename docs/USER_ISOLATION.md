@@ -50,3 +50,13 @@ cd frontend && npm run build
 ```
 
 `test_user_isolation.py` 在临时目录验证未登录访问、身份伪造、跨用户会话和附件、提示词/配置/背景/实验结果、迁移幂等、路径穿越、退出失效，以及并发 SSE、后台任务和线程的用户归属。测试不调用真实模型服务。
+
+## 显式同步已有账号配置
+
+管理员需要让已有账号使用相同的服务凭据和模型时，可先停止后端，再运行：
+
+```sh
+python scripts/sync_user_settings.py --source /secure/settings.json --users-root data/users --backup-root /secure/settings-backups
+```
+
+源文件使用已配置账号的 `settings.json`，通过 SSH 等私密渠道传输，不提交 Git。脚本先备份所有账号的原配置，再同步完整服务设置，重建当前模型的 `api_config`，不修改密码、会话、提示词及个人背景。同步后重启后端，使内存缓存重新加载；用户需要重新登录。没有私人提示词模板时，新会话也会使用已配置的默认模型。此操作仅影响当前已有账号，不改变新账号的空配置策略。
