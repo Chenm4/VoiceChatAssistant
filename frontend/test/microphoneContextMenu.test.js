@@ -84,3 +84,15 @@ test('Enter outside the composer uses the same action as right-click', () => {
   assert.equal(press({}).defaultPrevented, false)
   assert.equal(photos, 1)
 })
+
+test('reading the guide keeps native right-click without recording or capturing', () => {
+  const target = new EventTarget()
+  target.closest = selector => selector === '.user-guide-dialog' ? {} : null
+  let actions = 0
+  const cleanup = installMicrophoneContextMenu(target, () => actions++)
+  const event = new Event('contextmenu', { cancelable: true })
+  target.dispatchEvent(event)
+  assert.equal(actions, 0)
+  assert.equal(event.defaultPrevented, false)
+  cleanup()
+})

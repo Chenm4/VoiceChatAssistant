@@ -12,6 +12,8 @@
     </button>
 
     <div v-if="!isCollapsed" class="sidebar-brand"><span class="brand-mark"><AudioLines :size="22" /></span><div><strong>轻语</strong><span>VOICE ASSISTANT</span></div></div>
+    <button class="guide-entry" :class="{ compact: isCollapsed }" @click="showGuide = true" title="使用说明书" aria-label="打开使用说明书"><BookOpen :size="16" /><span v-if="!isCollapsed">使用说明书</span></button>
+    <UserGuide v-if="showGuide" @close="showGuide = false" />
     <button v-if="!isCollapsed" class="sidebar-lab" @click="emit('open-prompt-lab')">提示词实验室</button>
     <!-- 顶部工具栏 -->
     <div class="sidebar-header" v-if="!isCollapsed">
@@ -132,7 +134,7 @@
       </div>
     </div>
 
-    <div v-if="!isCollapsed" class="sidebar-footer"><el-button text :icon="Setting" @click="$emit('open-settings')">全局设置</el-button><span>让想法自然流动</span></div>
+    <div v-if="!isCollapsed" class="sidebar-footer"><el-button text :icon="Setting" @click="$emit('open-settings')">全局设置</el-button></div>
     <!-- 折叠状态下的按钮 -->
     <div v-if="isCollapsed" class="collapsed-actions">
       <el-button 
@@ -154,7 +156,9 @@
 
 <script setup>
 import { ref, nextTick, computed, watch, onUnmounted } from 'vue'
-import { AudioLines, Search, X, LoaderCircle } from 'lucide-vue-next'
+import { AudioLines, Search, X, LoaderCircle, BookOpen } from 'lucide-vue-next'
+import UserGuide from './UserGuide.vue'
+const showGuide = ref(false)
 import api from '../utils/api'
 import { createSessionSearch } from '../utils/sessionSearch'
 import { ElMessageBox } from 'element-plus'
@@ -555,4 +559,11 @@ function formatTime(timestamp) {
 .session-list::-webkit-scrollbar-thumb:hover {
   background: #9ca3af;
 }
+</style>
+
+<style scoped>
+.guide-entry { display: flex; align-items: center; gap: 9px; margin: 0 18px 10px; padding: 10px 12px; border: 1px solid #dbe3ed; border-radius: 9px; color: #475569; font-size: 13px; background: white; cursor: pointer; }
+.guide-entry:hover { color: #2563eb; background: #eff6ff; }
+.guide-entry:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+.guide-entry.compact { margin: 24px auto 0; padding: 10px; }
 </style>
