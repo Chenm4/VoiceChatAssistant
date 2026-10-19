@@ -1,9 +1,10 @@
+from backend.test.workspace_case import WorkspaceTestCase
 import unittest
 from backend.api.models import ChatMessage, Session
 from backend.api.routes import build_message_path
 from backend.services.chat_context import build_scoped_request
 
-class HistoryPackagingTests(unittest.TestCase):
+class HistoryPackagingTests(WorkspaceTestCase):
     def test_every_historical_question_is_a_separate_user_message(self):
         history = [{'role':'user','content':f'问题 {i}'} for i in range(12)]
         request = build_scoped_request(history, '当前问题')

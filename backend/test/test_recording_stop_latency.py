@@ -1,3 +1,4 @@
+from backend.test.workspace_case import WorkspaceAsyncTestCase
 import asyncio
 import unittest
 from types import SimpleNamespace
@@ -7,7 +8,7 @@ from backend.services.streaming_asr import StreamingASR
 from backend.services.soniox_streaming import SonioxStreamingClient
 
 
-class RecordingStopLatencyTests(unittest.IsolatedAsyncioTestCase):
+class RecordingStopLatencyTests(WorkspaceAsyncTestCase):
     async def test_stop_flushes_tail_and_sends_eof_without_waiting_for_timeout(self):
         asr = StreamingASR(preload=True)
         asr.loop = asyncio.get_running_loop()

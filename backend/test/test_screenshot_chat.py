@@ -1,3 +1,4 @@
+from backend.test.workspace_case import WorkspaceTestCase, user_state, patch_path
 import base64
 import asyncio
 import tempfile
@@ -11,7 +12,7 @@ from backend.api.models import ChatMessage, ChatRequest, MessageAttachment, Mess
 from backend.api import routes
 
 
-class ScreenshotChatTests(unittest.TestCase):
+class ScreenshotChatTests(WorkspaceTestCase):
     def test_default_screenshot_prompt_requires_answer_first(self):
         prompt = SessionConfig().screenshot_prompt
         self.assertIn("开头", prompt)
@@ -34,7 +35,7 @@ class ScreenshotChatTests(unittest.TestCase):
                 size=len(image_bytes),
             )
 
-            with patch.object(routes, "SCREENSHOT_DIR", screenshot_root):
+            with patch_path(routes, 'screenshots', screenshot_root):
                 content = routes._multimodal_user_content(
                     session_id, "answer this question", [attachment]
                 )
@@ -74,9 +75,9 @@ class ScreenshotChatTests(unittest.TestCase):
             old = MessageAttachment(id=old_id, mime_type="image/webp", filename=f"{old_id}.webp")
             message = ChatMessage(id="question", role="user", content="old", attachments=[old])
             session = Session(id=session_id, title="test", created_at=1, updated_at=1, messages=[message])
-            with patch.object(routes, "SCREENSHOT_DIR", root), \
-                 patch.object(routes.session_storage, "load_session", return_value=session), \
-                 patch.object(routes.session_storage, "save_session"):
+            with patch_path(routes, 'screenshots', root), \
+                 patch.object(user_state().session_storage, "load_session", return_value=session), \
+                 patch.object(user_state().session_storage, "save_session"):
                 asyncio.run(routes.update_message(
                     session_id, message.id,
                     MessageUpdateRequest(content="new", attachment_ids=[new_id]),
@@ -98,8 +99,8 @@ class ScreenshotChatTests(unittest.TestCase):
                 id="session_test", title="test", created_at=1, updated_at=1,
                 messages=[ChatMessage(id="question", role="user", content="image", attachments=[attachment])],
             )
-            with patch.object(routes, "SCREENSHOT_DIR", root), \
-                 patch.object(routes.session_storage, "load_session", return_value=session):
+            with patch_path(routes, 'screenshots', root), \
+                 patch.object(user_state().session_storage, "load_session", return_value=session):
                 with self.assertRaises(HTTPException) as result:
                     asyncio.run(routes.delete_unused_screenshot(session.id, image_id))
             self.assertEqual(result.exception.status_code, 409)
@@ -136,8 +137,8 @@ class ScreenshotChatTests(unittest.TestCase):
             )
             return [part async for part in response.body_iterator]
 
-        with patch.object(routes.session_storage, "load_session", return_value=session), \
-             patch.object(routes.session_storage, "save_session"), \
+        with patch.object(user_state().session_storage, "load_session", return_value=session), \
+             patch.object(user_state().session_storage, "save_session"), \
              patch.object(routes, "resolve_model_targets", return_value=[provider_target]), \
              patch.object(routes, "build_message_path", return_value=[question]), \
              patch.object(routes, "OpenAI", return_value=completion), \
@@ -191,8 +192,8 @@ class ScreenshotChatTests(unittest.TestCase):
                 return [part async for part in response.body_iterator]
             await asyncio.gather(consume(first), consume(second))
 
-        with patch.object(routes.session_storage, "load_session", side_effect=load), \
-             patch.object(routes.session_storage, "save_session", side_effect=save), \
+        with patch.object(user_state().session_storage, "load_session", side_effect=load), \
+             patch.object(user_state().session_storage, "save_session", side_effect=save), \
              patch.object(routes, "resolve_model_targets", return_value=[provider_target]), \
              patch.object(routes, "OpenAI", return_value=completion), \
              patch.object(routes, "log_model_request_context"), \

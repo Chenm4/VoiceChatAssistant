@@ -1,3 +1,4 @@
+from backend.test.workspace_case import WorkspaceTestCase, patch_path
 import json
 import tempfile
 import unittest
@@ -7,7 +8,7 @@ from unittest.mock import patch
 from prompt_lab import service
 
 
-class PromptLabTests(unittest.TestCase):
+class PromptLabTests(WorkspaceTestCase):
     def test_catalog_is_well_formed_and_does_not_expose_keys(self):
         catalog = service.get_catalog()
         self.assertGreaterEqual(len(catalog["prompts"]), 4)
@@ -29,7 +30,7 @@ class PromptLabTests(unittest.TestCase):
                 "created_at": 1, "finished_at": 2, "completed": 1,
                 "total": 1, "models": ["qwen-test"],
             }), encoding="utf-8")
-            with patch.object(service, "DATA_DIR", Path(directory)):
+            with patch_path(service, 'prompt_lab/data/runs', Path(directory)):
                 summaries = service.list_runs()
         self.assertEqual(summaries[0]["name"], "测试")
 
@@ -46,8 +47,7 @@ class PromptLabTests(unittest.TestCase):
                 "system_prompt": "旧 system",
                 "user_prompt_template": "旧问题：{{question}}",
             }], ensure_ascii=False), encoding="utf-8")
-            with patch.object(service, "PROMPTS_FILE", prompts_file), patch.object(
-                service, "PROMPT_HISTORY_DIR", history_dir
+            with patch_path(service, 'prompt_lab/prompts.json', prompts_file), patch_path(service, 'prompt_lab/data/prompt_history', history_dir
             ):
                 saved = service.save_prompt({
                     "name": "新模板",

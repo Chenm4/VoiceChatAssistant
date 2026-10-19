@@ -91,26 +91,40 @@ class Logger:
         return Logger.get_logger(app_name, str(log_file))
 
 
-# 预定义的日志记录器
+class WorkspaceLogger:
+    def __init__(self, name):
+        self.name = name
+
+    def __getattr__(self, attribute):
+        return getattr(_resolve_logger(self.name), attribute)
+
+
+def _resolve_logger(name):
+    from backend.services.user_workspace import _current
+    current = _current.get()
+    if current is None:
+        return Logger.setup_app_logger(name)
+    path = current.path(f'logs/{name}.log')
+    key = f'{name}.{current.username}.{current.root}'
+    logger = Logger.get_logger(key, str(path))
+    # User prompt/transcript text must not also be copied to a common console log.
+    for handler in list(logger.handlers):
+        if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+            logger.removeHandler(handler)
+    return logger
+
+
 def get_app_logger():
-    """获取应用主日志记录器"""
-    return Logger.setup_app_logger('chatgpt_web')
+    return WorkspaceLogger('chatgpt_web')
 
 
 def get_asr_logger():
-    """获取语音识别日志记录器"""
-    log_dir = Path(__file__).parent.parent / 'logs'
-    today = datetime.now().strftime('%Y-%m-%d')
-    log_file = log_dir / f'asr_{today}.log'
-    return Logger.get_logger('asr', str(log_file))
+    from backend.services.user_workspace import _current
+    return _resolve_logger('asr') if _current.get() else WorkspaceLogger('asr')
 
 
 def get_api_logger():
-    """获取 API 日志记录器"""
-    log_dir = Path(__file__).parent.parent / 'logs'
-    today = datetime.now().strftime('%Y-%m-%d')
-    log_file = log_dir / f'api_{today}.log'
-    return Logger.get_logger('api', str(log_file))
+    return WorkspaceLogger('api')
 
 
 # 便捷函数

@@ -14,7 +14,7 @@ import websockets
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from backend.services import doubao_realtime as protocol
-from backend.services.session_storage import session_storage
+from backend.services.user_workspace import user_state, user_path
 from backend.services.session_prompt import compose_session_system_prompt, render_session_user_prompt
 
 router = APIRouter(prefix='/doubao-realtime', tags=['豆包实时语音'])
@@ -30,7 +30,7 @@ class StartOptions(BaseModel):
 
 
 def session_instructions(session_id):
-    session = session_storage.load_session(session_id)
+    session = user_state().session_storage.load_session(session_id)
     if session is None:
         raise ValueError('会话不存在')
     system = compose_session_system_prompt(session) or ''
@@ -73,10 +73,10 @@ async def finish_session(upstream):
 
 
 def load_recording(options):
-    session = session_storage.load_session(options.session_id)
+    session = user_state().session_storage.load_session(options.session_id)
     if session is None or options.audio_file not in session.audio_files:
         raise ValueError('录音不属于当前会话')
-    root = Path(__file__).resolve().parents[2] / 'data' / 'voices'
+    root = user_path('voices')
     path = (root / options.audio_file).resolve()
     if path.parent != root.resolve():
         raise ValueError('无效的录音路径')

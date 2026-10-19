@@ -1,6 +1,6 @@
 """Real-time microphone noise suppression for 16-bit mono PCM."""
 
-import os
+from backend.services.user_workspace import user_config
 
 
 class NoiseSuppressor:
@@ -24,7 +24,7 @@ class NoiseSuppressor:
         self.history_samples = int(sample_rate * 0.75)
         self._history = np.empty(0, dtype=np.int16)
         try:
-            self.strength = float(os.getenv("AUDIO_NOISE_REDUCTION_STRENGTH", "0.3"))
+            self.strength = float(user_config('NOISE_REDUCTION')['strength'])
         except ValueError as exc:
             raise ValueError("AUDIO_NOISE_REDUCTION_STRENGTH must be a number") from exc
         if not 0 <= self.strength <= 1:
@@ -53,8 +53,7 @@ class NoiseSuppressor:
 
 def create_noise_suppressor(sample_rate: int, channels: int, logger):
     """Return a fresh suppressor, or log why unprocessed audio is used."""
-    enabled = os.getenv("AUDIO_NOISE_REDUCTION", "true").strip().lower()
-    if enabled in {"0", "false", "off", "no"}:
+    if not user_config('NOISE_REDUCTION')['enabled']:
         logger.info("麦克风降噪已通过 AUDIO_NOISE_REDUCTION 关闭")
         return None
     try:

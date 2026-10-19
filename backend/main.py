@@ -12,6 +12,9 @@ from fastapi.staticfiles import StaticFiles
 # 添加项目根目录到路径
 sys.path.append(str(Path(__file__).parent.parent))
 
+from backend.auth.bootstrap import bootstrap_users
+from backend.auth.session import AuthenticationMiddleware, router as auth_router
+
 from backend.api.routes import router
 from prompt_lab.router import router as prompt_lab_router
 from backend.api.doubao_realtime import router as doubao_realtime_router
@@ -48,6 +51,10 @@ app.add_middleware(
     expose_headers=["X-User-Message-Id"],
 )
 
+# Authentication wraps HTTP, SSE and WebSocket lifetimes.
+app.add_middleware(AuthenticationMiddleware)
+app.include_router(auth_router, prefix="/api")
+
 # 注册路由
 app.include_router(router, prefix="/api")
 app.include_router(prompt_lab_router, prefix="/api")
@@ -57,6 +64,7 @@ app.include_router(doubao_realtime_router, prefix="/api")
 @app.on_event("startup")
 async def startup_event():
     """应用启动事件"""
+    bootstrap_users()
     logger.info("="*60)
     logger.info("🚀 ChatGPT Web 应用启动")
     logger.info("="*60)

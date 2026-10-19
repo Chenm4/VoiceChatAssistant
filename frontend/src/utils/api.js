@@ -3,6 +3,7 @@
  */
 
 import axios from 'axios'
+import { authHeaders, sessionExpired } from './auth.js'
 
 const api = axios.create({
   baseURL: '/api',
@@ -15,6 +16,7 @@ const api = axios.create({
 // 请求拦截器
 api.interceptors.request.use(
   config => {
+    Object.assign(config.headers, authHeaders())
     return config
   },
   error => {
@@ -28,6 +30,7 @@ api.interceptors.response.use(
     return response.data
   },
   error => {
+    if (error.response?.status === 401) sessionExpired()
     console.error('API Error:', error)
     return Promise.reject(error)
   }

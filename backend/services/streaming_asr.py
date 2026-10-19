@@ -10,6 +10,8 @@
 - 自动保存：录音自动保存为 WAV 文件
 """
 
+from backend.services.user_workspace import user_config, user_path
+
 import asyncio
 import audioop
 import queue
@@ -30,7 +32,6 @@ from backend.services.noise_suppression import create_noise_suppressor
 from backend.services.audio_level import AudioLevelMeter
 from backend.services.volcengine_streaming import VolcengineStreamingClient
 from backend.services.soniox_streaming import SonioxStreamingClient
-from config import AUDIO_CONFIG, ASR_CONFIG, SONIOX_CONFIG, VOLCENGINE_CONFIG
 
 
 
@@ -82,6 +83,7 @@ class StreamingASR:
                     预热模式可以提前创建实例，加速首次录音启动
         """
         self.logger = get_asr_logger()
+        self.voice_dir = user_path('voices')
         # 状态变量
         self.is_recording: bool = False
         self.audio_queue: Optional[asyncio.Queue] = None
@@ -97,20 +99,20 @@ class StreamingASR:
         self.preloaded: bool = preload
         self.recording_start_time: Optional[float] = None  # 录音开始时间
         self.saved_audio_file: Optional[str] = None
-        self.max_duration_seconds: int = AUDIO_CONFIG.get('max_duration_minutes', 5) * 60  # 最大录音时长（秒）
+        self.max_duration_seconds: int = user_config('AUDIO_CONFIG').get('max_duration_minutes', 5) * 60  # 最大录音时长（秒）
         self.auto_stopped: bool = False  # 是否因超时自动停止
-        self.provider: str = ASR_CONFIG.get('provider', 'soniox').lower()
+        self.provider: str = user_config('ASR_CONFIG').get('provider', 'soniox').lower()
         
         # 音频参数
-        self.CHUNK: int = AUDIO_CONFIG['chunk']
+        self.CHUNK: int = user_config('AUDIO_CONFIG')['chunk']
         self.FORMAT = pyaudio.paInt16
-        self.CHANNELS: int = AUDIO_CONFIG['channels']
-        self.RATE: int = AUDIO_CONFIG['rate']
+        self.CHANNELS: int = user_config('AUDIO_CONFIG')['channels']
+        self.RATE: int = user_config('AUDIO_CONFIG')['rate']
         
         # 音频分段参数。两个后端都使用 16-bit PCM，并通过持久连接流式传输。
-        self.url: str = VOLCENGINE_CONFIG.get('ws_url', 'wss://openspeech.bytedance.com/api/v2/asr')
+        self.url: str = user_config('VOLCENGINE_CONFIG').get('ws_url', 'wss://openspeech.bytedance.com/api/v2/asr')
         self.segment_duration: int = (
-            VOLCENGINE_CONFIG.get('segment_duration', 200)
+            user_config('VOLCENGINE_CONFIG').get('segment_duration', 200)
             if self.provider == 'volcengine'
             else 200
         )
@@ -229,19 +231,19 @@ class StreamingASR:
             
             if self.provider == 'soniox':
                 self.ws_client = SonioxStreamingClient(
-                    api_key=SONIOX_CONFIG['api_key'],
-                    ws_url=SONIOX_CONFIG.get('ws_url'),
-                    model=SONIOX_CONFIG['model'],
+                    api_key=user_config('SONIOX_CONFIG')['api_key'],
+                    ws_url=user_config('SONIOX_CONFIG').get('ws_url'),
+                    model=user_config('SONIOX_CONFIG')['model'],
                     sample_rate=self.RATE,
                     num_channels=self.CHANNELS,
-                    language=SONIOX_CONFIG.get('language', 'zh'),
-                    context=SONIOX_CONFIG.get('context'),
+                    language=user_config('SONIOX_CONFIG').get('language', 'zh'),
+                    context=user_config('SONIOX_CONFIG').get('context'),
                 )
             elif self.provider == 'volcengine':
                 self.ws_client = VolcengineStreamingClient(
-                    appid=VOLCENGINE_CONFIG['appid'],
-                    token=VOLCENGINE_CONFIG['token'],
-                    cluster=VOLCENGINE_CONFIG['cluster'],
+                    appid=user_config('VOLCENGINE_CONFIG')['appid'],
+                    token=user_config('VOLCENGINE_CONFIG')['token'],
+                    cluster=user_config('VOLCENGINE_CONFIG')['cluster'],
                     ws_url=self.url,
                     segment_duration=self.segment_duration
                 )
@@ -250,7 +252,7 @@ class StreamingASR:
                     f"不支持的 ASR_PROVIDER: {self.provider}。可选值为 soniox 或 volcengine"
                 )
             endpoint = (
-                SONIOX_CONFIG.get('ws_url')
+                user_config('SONIOX_CONFIG').get('ws_url')
                 if self.provider == 'soniox'
                 else self.url
             )
@@ -604,7 +606,7 @@ class StreamingASR:
                 return None
             
             # 创建保存目录
-            save_dir = Path(__file__).parent.parent.parent / "data" / "voices"
+            save_dir = self.voice_dir
             save_dir.mkdir(parents=True, exist_ok=True)
             
             # 生成文件名（使用时间戳）

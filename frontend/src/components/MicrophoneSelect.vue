@@ -13,6 +13,8 @@
 </template>
 
 <script setup>
+import { userStorage } from '../utils/auth'
+
 import { computed, onMounted, ref } from 'vue'
 import api from '../utils/api'
 import { preferredRecordingDevice } from '../utils/recordingDevices'
@@ -31,7 +33,7 @@ const selectedName = computed(() => devices.value.find(device => String(device.i
 function selectDevice() {
   const device = devices.value.find(device => String(device.index) === selectedIndex.value) || null
   error.value = ''
-  try { localStorage.setItem(props.storageKey, JSON.stringify(device)) } catch {}
+  try { userStorage.setItem(props.storageKey, JSON.stringify(device)) } catch {}
   emit('change', device)
 }
 
@@ -44,7 +46,7 @@ async function loadDevices() {
     devices.value = result.devices
     defaultIndex.value = result.default_index
     let saved = null
-    try { saved = JSON.parse(localStorage.getItem(props.storageKey) || 'null') } catch {}
+    try { saved = JSON.parse(userStorage.getItem(props.storageKey) || 'null') } catch {}
     const matching = saved && (devices.value.find(device => device.index === saved.index && device.name === saved.name)
       || devices.value.find(device => device.name === saved.name))
     const preferred = (props.preferUsb || props.preferMicrophone)

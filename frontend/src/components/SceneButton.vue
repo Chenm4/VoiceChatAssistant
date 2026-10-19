@@ -8,6 +8,8 @@
   </button>
 </template>
 <script setup>
+import { userStorage } from '../utils/auth'
+
 import { ref, onMounted, onUnmounted } from 'vue'
 const props = defineProps({ scene: Object, selected: Boolean, disabled: Boolean })
 const emit = defineEmits(['select'])
@@ -16,7 +18,7 @@ const position = ref(null)
 let gesture = null
 let suppressClick = false
 const key = () => `prompt-scene-position:${props.scene.id}`
-function persist() { try { localStorage.setItem(key(), JSON.stringify(position.value)) } catch {} }
+function persist() { try { userStorage.setItem(key(), JSON.stringify(position.value)) } catch {} }
 function clamp(left, top) {
   return { left: Math.max(0, Math.min(left, innerWidth - (button.value?.offsetWidth || 150))), top: Math.max(0, Math.min(top, innerHeight - (button.value?.offsetHeight || 50))) }
 }
@@ -45,7 +47,7 @@ function click() { if (suppressClick) { suppressClick = false; return }; if (!pr
 function reset() { position.value = null; persist() }
 function resize() { if (position.value) position.value = clamp(position.value.left, position.value.top) }
 onMounted(() => {
-  try { const saved = JSON.parse(localStorage.getItem(key())); if (Number.isFinite(saved?.left) && Number.isFinite(saved?.top)) position.value = clamp(saved.left, saved.top) } catch {}
+  try { const saved = JSON.parse(userStorage.getItem(key())); if (Number.isFinite(saved?.left) && Number.isFinite(saved?.top)) position.value = clamp(saved.left, saved.top) } catch {}
   window.addEventListener('resize', resize)
   window.addEventListener('reset-scene-positions', reset)
 })

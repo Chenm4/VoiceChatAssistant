@@ -34,6 +34,8 @@
   </section>
 </template>
 <script setup>
+import { userStorage } from '../utils/auth'
+
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import api from '../utils/api'
@@ -47,7 +49,7 @@ const draft = ref({ common_rules: '', scenes: [] })
 const loadError = ref('')
 const editing = ref(false), saving = ref(false), busy = ref(false), rerun = ref(true), editIndex = ref(0)
 const editedScene = computed(() => draft.value.scenes[editIndex.value])
-function savePreference() { try { localStorage.setItem('scene-rerun', JSON.stringify(rerun.value)) } catch {} }
+function savePreference() { try { userStorage.setItem('scene-rerun', JSON.stringify(rerun.value)) } catch {} }
 function resetPositions() { window.dispatchEvent(new Event('reset-scene-positions')) }
 async function load() {
   try {
@@ -62,7 +64,7 @@ async function load() {
   }
 }
 onMounted(async () => {
-  try { rerun.value = localStorage.getItem('scene-rerun') !== 'false' } catch {}
+  try { rerun.value = userStorage.getItem('scene-rerun') !== 'false' } catch {}
   try { await load() } catch { ElMessage.error(loadError.value) }
 })
 async function openEditor() {

@@ -1,3 +1,4 @@
+import { authFetch } from './auth.js'
 export function clipboardImages(clipboardData) {
   const images = Array.from(clipboardData?.items || [])
     .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
@@ -9,7 +10,7 @@ export async function uploadChatImage(file, sessionId) {
   const form = new FormData()
   form.append('session_id', sessionId)
   form.append('screenshot', file, file.name || 'clipboard.png')
-  const response = await fetch('/api/attachments/screenshots', { method: 'POST', body: form })
+  const response = await authFetch('/api/attachments/screenshots', { method: 'POST', body: form })
   if (!response.ok) {
     const error = await response.json().catch(() => ({}))
     throw new Error(error.detail || `图片上传失败 (${response.status})`)

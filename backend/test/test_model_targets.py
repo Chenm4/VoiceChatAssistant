@@ -1,3 +1,4 @@
+from backend.test.workspace_case import WorkspaceTestCase, user_state
 import unittest
 from unittest.mock import patch
 from pydantic import ValidationError
@@ -6,8 +7,9 @@ from backend.api import routes
 from backend.api.models import ConfigSource, ModelTarget, SessionConfig
 
 
-class ModelTargetTests(unittest.TestCase):
+class ModelTargetTests(WorkspaceTestCase):
     def setUp(self):
+        super().setUp()
         self.sources = [
             ConfigSource(
                 name="SourceA",
@@ -33,7 +35,7 @@ class ModelTargetTests(unittest.TestCase):
             ModelTarget(source_name="SourceB", model="shared-model"),
         ])
 
-        with patch.object(routes, "config_sources", self.sources):
+        with patch.object(user_state(), 'config_sources', self.sources):
             targets = routes.resolve_model_targets(config)
 
         self.assertEqual(
@@ -48,13 +50,13 @@ class ModelTargetTests(unittest.TestCase):
     def test_legacy_single_source_config_still_resolves(self):
         config = SessionConfig(source_name="SourceA", models=["model-a"])
 
-        with patch.object(routes, "config_sources", self.sources):
+        with patch.object(user_state(), 'config_sources', self.sources):
             targets = routes.resolve_model_targets(config)
 
         self.assertEqual(targets[0]["key"], "SourceA::model-a")
 
     def test_requested_composite_model_selects_exact_source(self):
-        with patch.object(routes, "config_sources", self.sources):
+        with patch.object(user_state(), 'config_sources', self.sources):
             targets = routes.resolve_model_targets(None, "SourceB::shared-model")
 
         self.assertEqual(len(targets), 1)
@@ -105,7 +107,7 @@ class ModelTargetTests(unittest.TestCase):
         source = ConfigSource(name="OpenRouter", api_key="key",
                               base_url="https://openrouter.ai/api/v1", models=["openai/gpt-6-astra"])
         config = SessionConfig(model_targets=[ModelTarget(source_name=source.name, model=source.models[0])])
-        with patch.object(routes, "config_sources", [source]):
+        with patch.object(user_state(), 'config_sources', [source]):
             targets = routes.resolve_model_targets(config)
         self.assertEqual(targets[0]['reasoning_effort'], 'minimal')
 

@@ -1,3 +1,4 @@
+from backend.test.workspace_case import WorkspaceAsyncTestCase, user_state
 import asyncio
 import unittest
 from types import SimpleNamespace
@@ -5,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 from backend.services.streaming_asr import StreamingASR
 from backend.api import routes
 
-class CancelRecordingTests(unittest.IsolatedAsyncioTestCase):
+class CancelRecordingTests(WorkspaceAsyncTestCase):
     async def test_cancel_keeps_partial_text_without_waiting_for_final_tokens_or_queue(self):
         asr = StreamingASR()
         asr.partial_text = 'USB 已识别内容，麦克风追加内容'
@@ -24,7 +25,7 @@ class CancelRecordingTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_endpoint_passes_fast_mode_and_returns_preserved_draft(self):
         stop = AsyncMock(return_value=('已识别草稿', None))
         current = SimpleNamespace(stop_streaming=stop, session_id='s', saved_audio_file=None)
-        with patch.object(routes, 'streaming_asr', current), patch.object(routes, 'attach_recording_to_session'):
+        with patch.object(user_state(), 'streaming_asr', current), patch.object(routes, 'attach_recording_to_session'):
             result = await routes.stop_recording(finalize=False)
         stop.assert_awaited_once_with(finalize=False)
         self.assertTrue(result.success)

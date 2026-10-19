@@ -1,3 +1,4 @@
+from backend.test.workspace_case import WorkspaceTestCase, user_state
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -6,15 +7,15 @@ from fastapi.testclient import TestClient
 from backend.api import routes
 from backend.services.session_storage import SessionStorage
 
-class NewSessionDefaultsTests(unittest.TestCase):
+class NewSessionDefaultsTests(WorkspaceTestCase):
     def test_new_session_api_persists_both_models_and_reasoning_efforts(self):
         app = FastAPI()
         app.include_router(routes.router, prefix='/api')
         with tempfile.TemporaryDirectory() as directory, \
-             patch.object(routes, 'current_session_id', None), \
-             patch.object(routes, 'current_session_cache', None):
+             patch.object(user_state(), 'current_session_id', None), \
+             patch.object(user_state(), 'current_session_cache', None):
             storage = SessionStorage(directory)
-            with patch.object(routes, 'session_storage', storage), TestClient(app) as client:
+            with patch.object(user_state(), 'session_storage', storage), TestClient(app) as client:
                 response = client.post('/api/sessions', params={'title':'default-test'})
                 self.assertEqual(response.status_code, 200)
                 payload = response.json()

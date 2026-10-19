@@ -14,25 +14,16 @@ ENDPOINT = 'wss://openspeech.bytedance.com/api/v3/duplex/realtime/dialogue'
 RESOURCE_ID = 'volc.service_type.10074'
 MODEL = '1.2.6.1'
 MODEL_NAME = 'Seeduplex 3.0'
-ENV_PATH = Path(__file__).resolve().parents[2] / '.env.local'
-
-
 def credentials():
-    values = {}
-    if ENV_PATH.exists():
-        for line in ENV_PATH.read_text(encoding='utf-8').splitlines():
-            key, sep, value = line.partition('=')
-            if sep and key in ('DOUBAO_REALTIME_APP_ID', 'DOUBAO_REALTIME_ACCESS_TOKEN'):
-                parts = shlex.split(value)
-                values[key] = parts[0] if parts else ''
-    return tuple(os.environ.get(key, values.get(key, '')) for key in
-                 ('DOUBAO_REALTIME_APP_ID', 'DOUBAO_REALTIME_ACCESS_TOKEN'))
+    from backend.services.user_workspace import user_config
+    values = user_config('DOUBAO_REALTIME')
+    return values['app_id'], values['access_token']
 
 
 def auth_headers(connect_id):
     app_id, token = credentials()
     if not app_id or not token:
-        raise ValueError('请在后端 .env.local 配置豆包实时语音凭据')
+        raise ValueError('请在当前用户的 settings.json 配置 DOUBAO_REALTIME 凭据')
     return {'X-Api-App-ID': app_id, 'X-Api-Access-Key': token,
             'X-Api-Resource-Id': RESOURCE_ID,
             'X-Api-App-Key': 'PlgvMymc7f3tQnJ6', 'X-Api-Connect-Id': connect_id,

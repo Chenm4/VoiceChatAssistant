@@ -5,6 +5,8 @@
 按会话分文件存储，清晰展示每个模型的请求和响应。
 """
 
+from backend.services.user_workspace import user_path, workspace
+
 import json
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +14,6 @@ from typing import List, Dict, Any, Optional
 
 
 # 常量定义
-CHAT_LOGS_DIR = Path(__file__).parent.parent.parent / "logs" / "chat_history"
 
 
 class SessionChatLogger:
@@ -37,11 +38,11 @@ class SessionChatLogger:
             Path: 日志文件路径
         """
         # 创建日志目录
-        CHAT_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        user_path('logs/chat_history').mkdir(parents=True, exist_ok=True)
         
         # 生成日志文件名: session_{session_id}_{date}.log
         date_str = datetime.now().strftime('%Y%m%d')
-        log_file = CHAT_LOGS_DIR / f"session_{self.session_id}_{date_str}.log"
+        log_file = user_path('logs/chat_history') / f"session_{self.session_id}_{date_str}.log"
         
         # 如果是新文件，写入会话头部
         if not log_file.exists():
@@ -177,7 +178,6 @@ class SessionChatLogger:
 
 
 # 全局会话日志记录器缓存
-_session_loggers: Dict[str, SessionChatLogger] = {}
 
 
 def get_session_logger(session_id: str) -> SessionChatLogger:
@@ -189,9 +189,9 @@ def get_session_logger(session_id: str) -> SessionChatLogger:
     Returns:
         SessionChatLogger: 会话日志记录器
     """
-    if session_id not in _session_loggers:
-        _session_loggers[session_id] = SessionChatLogger(session_id)
-    return _session_loggers[session_id]
+    if session_id not in workspace().chat_loggers:
+        workspace().chat_loggers[session_id] = SessionChatLogger(session_id)
+    return workspace().chat_loggers[session_id]
 
 
 def log_model_interaction(

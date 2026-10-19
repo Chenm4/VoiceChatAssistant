@@ -21,6 +21,8 @@
 </template>
 
 <script setup>
+import { userStorage } from '../utils/auth'
+
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
 const props = defineProps({
@@ -78,7 +80,7 @@ function positionAtDefaultAnchor() {
 
 function loadPosition() {
   try {
-    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null')
+    const stored = JSON.parse(userStorage.getItem(STORAGE_KEY) || 'null')
     if (Number.isFinite(stored?.left) && Number.isFinite(stored?.top)) {
       customPosition = true
       applyPosition(stored.left, stored.top)
@@ -92,14 +94,14 @@ function loadPosition() {
 }
 
 function savePosition() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({
+  userStorage.setItem(STORAGE_KEY, JSON.stringify({
     left: currentLeft,
     top: currentTop
   }))
 }
 
 function resetPosition() {
-  localStorage.removeItem(STORAGE_KEY)
+  userStorage.removeItem(STORAGE_KEY)
   customPosition = false
   positionAtDefaultAnchor()
 }

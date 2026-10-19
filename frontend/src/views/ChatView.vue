@@ -183,6 +183,8 @@
 </template>
 
 <script setup>
+import { userStorage, authFetch, privateUrl } from '../utils/auth'
+
 import { preferredRecordingDevice } from '../utils/recordingDevices'
 import { recordingRoute, recordingModeName, RECORDING_MODES } from '../utils/recordingRoute'
 import { beginTargetedAnswer, appendAnswerDelta } from '../utils/answerStream'
@@ -217,10 +219,10 @@ let recordingWithDoubao = false
 
 const captureButtonSize = ref(64)
 try {
-  const savedSize = Number(localStorage.getItem('captureButtonSize'))
+  const savedSize = Number(userStorage.getItem('captureButtonSize'))
   if (Number.isFinite(savedSize) && savedSize >= 40 && savedSize <= 120) captureButtonSize.value = savedSize
 } catch {}
-watch(captureButtonSize, size => { try { localStorage.setItem('captureButtonSize', String(size)) } catch {} })
+watch(captureButtonSize, size => { try { userStorage.setItem('captureButtonSize', String(size)) } catch {} })
 const pasteImageUploads = ref(0)
 let pasteImageVersion = 0
 async function handlePasteImages(files) {
@@ -352,7 +354,7 @@ const sameRecordingDevice = computed(() => resolvedMicrophone.value && resolvedS
   && resolvedMicrophone.value.index === resolvedSoundCard.value.index)
 function storedRecordingMode(key, fallback) {
   try {
-    const mode = localStorage.getItem(key)
+    const mode = userStorage.getItem(key)
     return RECORDING_MODES.includes(mode) ? mode : fallback
   } catch { return fallback }
 }
@@ -363,8 +365,8 @@ const recordingModeLabel = computed(() => recordingModeName(isRecording.value
   ? activeRecordingMode.value : buttonRecordingMode.value, sameRecordingDevice.value))
 function saveRecordingModes() {
   try {
-    localStorage.setItem('recordingButtonMode', buttonRecordingMode.value)
-    localStorage.setItem('recordingRightClickMode', rightClickRecordingMode.value)
+    userStorage.setItem('recordingButtonMode', buttonRecordingMode.value)
+    userStorage.setItem('recordingRightClickMode', rightClickRecordingMode.value)
   } catch {}
 }
 function routeForRecording(source) {
@@ -375,8 +377,8 @@ const recordingDeviceSummary = computed(() => `麦克风：${resolvedMicrophone.
 async function resetRecordingInputs() {
   if (isRecording.value || isProcessingRecording.value) return
   try {
-    localStorage.removeItem('recordingMicrophone')
-    localStorage.removeItem('recordingUsbInput')
+    userStorage.removeItem('recordingMicrophone')
+    userStorage.removeItem('recordingUsbInput')
   } catch {}
   await initializeRecordingInputs()
   recordingDeviceRevision.value++
@@ -400,7 +402,7 @@ async function initializeRecordingInputs() {
   try {
     const { devices, default_index } = await api.get('/recording/devices')
     defaultRecordingDevice.value = devices.find(device => device.index === default_index) || null
-    const saved = key => { try { return JSON.parse(localStorage.getItem(key) || 'null') } catch { return null } }
+    const saved = key => { try { return JSON.parse(userStorage.getItem(key) || 'null') } catch { return null } }
     selectedMicrophone.value = preferredRecordingDevice(devices, saved('recordingMicrophone'), 'microphone')
     selectedUsbInput.value = preferredRecordingDevice(devices, saved('recordingUsbInput'), 'usb')
   } catch (error) { console.warn('读取录音设备失败:', error) }
@@ -409,7 +411,7 @@ onMounted(initializeRecordingInputs)
 
 const isTyping = ref(false)
 function loadLayoutPreferences() {
-  try { return JSON.parse(localStorage.getItem('chatLayoutPreferences') || '{}') } catch { return {} }
+  try { return JSON.parse(userStorage.getItem('chatLayoutPreferences') || '{}') } catch { return {} }
 }
 const layoutPreferences = loadLayoutPreferences()
 const headerPosition = ref(layoutPreferences.header === 'bottom' ? 'bottom' : 'top')
@@ -418,7 +420,7 @@ const composerOpacity = ref(Number.isFinite(layoutPreferences.opacity) ? layoutP
 const composerHeight = ref(80), inputAreaRef = ref(null), captureButtonRef = ref(null)
 let composerObserver
 watch([headerPosition, scenePosition], async () => { await nextTick(); captureButtonRef.value?.reposition() })
-watch([headerPosition, scenePosition, composerOpacity], () => localStorage.setItem('chatLayoutPreferences', JSON.stringify({ header: headerPosition.value, scenes: scenePosition.value, opacity: composerOpacity.value })))
+watch([headerPosition, scenePosition, composerOpacity], () => userStorage.setItem('chatLayoutPreferences', JSON.stringify({ header: headerPosition.value, scenes: scenePosition.value, opacity: composerOpacity.value })))
 onMounted(() => {
   composerObserver = new ResizeObserver(() => {
     composerHeight.value = inputAreaRef.value?.$el?.getBoundingClientRect().height || 80
@@ -437,7 +439,7 @@ const captureConnected = ref(false)
 const captureSourceName = ref('')
 const captureSourceType = ref('camera')
 const cameraDevices = ref([])
-const selectedCameraId = ref(localStorage.getItem('captureCameraId') || '')
+const selectedCameraId = ref(userStorage.getItem('captureCameraId') || '')
 const isCapturing = ref(false)
 const stoppingResponses = ref(false)
 const doubaoBusy = ref(false)
@@ -452,7 +454,7 @@ const pendingCapturePreviews = computed(() => {
   const attachments = [...pendingCaptures.value, ...captureQueue.value.map(item => item.attachment)]
   return attachments.map(item => ({
     id: item.id,
-    url: `/api/attachments/${encodeURIComponent(currentSessionId.value || '')}/${encodeURIComponent(item.id)}`
+    url: privateUrl(`/api/attachments/${encodeURIComponent(currentSessionId.value || '')}/${encodeURIComponent(item.id)}`)
   }))
 })
 let captureVersion = 0
@@ -626,7 +628,7 @@ async function handleSendMessage(options = {}) {
   let lastChunkTime = startTime
   
   try {
-    const response = await fetch('/api/chat', {
+    const response = await authFetch('/api/chat', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -886,7 +888,7 @@ function removePendingCapture(id) {
 
 function releaseUnusedCapture(sessionId, id) {
   if (!sessionId || !id) return
-  fetch(`/api/attachments/${encodeURIComponent(sessionId)}/${encodeURIComponent(id)}`, {
+  authFetch(privateUrl(`/api/attachments/${encodeURIComponent(sessionId)}/${encodeURIComponent(id)}`), {
     method: 'DELETE'
   }).catch(error => console.warn('清理未使用截图失败:', error))
 }
@@ -930,7 +932,7 @@ async function sendImmediateCapture(item) {
   activeCaptureCount.value++
   let completed = false
   try {
-    const response = await fetch('/api/chat', {
+    const response = await authFetch('/api/chat', {
       method: 'POST',
       signal: controller.signal,
       headers: { 'Content-Type': 'application/json' },
@@ -1050,7 +1052,7 @@ function changeCaptureSource(type) {
 function changeCamera(id) {
   stopCaptureSource()
   selectedCameraId.value = id
-  localStorage.setItem('captureCameraId', id)
+  userStorage.setItem('captureCameraId', id)
 }
 
 async function refreshCameraDevices() {
@@ -1100,7 +1102,7 @@ async function uploadScreenshot(frame, sessionId = currentSessionId.value, signa
   formData.append('width', String(frame.width))
   formData.append('height', String(frame.height))
   formData.append('screenshot', frame.blob, `capture-${Date.now()}.webp`)
-  const response = await fetch('/api/attachments/screenshots', {
+  const response = await authFetch('/api/attachments/screenshots', {
     method: 'POST',
     signal,
     body: formData
@@ -1713,7 +1715,7 @@ function clipboardMarkdownHtml(content) {
 }
 
 function sessionAttachmentUrl(sessionId, attachment) {
-  return `/api/attachments/${encodeURIComponent(sessionId)}/${encodeURIComponent(attachment.id)}`
+  return privateUrl(`/api/attachments/${encodeURIComponent(sessionId)}/${encodeURIComponent(attachment.id)}`)
 }
 
 async function buildExportAttachments(sessionId, attachments = []) {
@@ -1723,7 +1725,7 @@ async function buildExportAttachments(sessionId, attachments = []) {
     const absoluteUrl = new URL(relativeUrl, window.location.origin).href
     let imageUrl = absoluteUrl
     try {
-      const response = await fetch(relativeUrl)
+      const response = await authFetch(relativeUrl)
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       imageUrl = await blobToDataUrl(await response.blob())
     } catch (error) {
@@ -1810,7 +1812,7 @@ async function handleCopySession(sessionId, command) {
 
 async function handleMergeSessionAudio(sessionId) {
   try {
-    const response = await fetch(`/api/sessions/${sessionId}/audio/merged`)
+    const response = await authFetch(`/api/sessions/${sessionId}/audio/merged`)
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}))
       throw new Error(errorData.detail || '合并录音失败')
@@ -1909,7 +1911,7 @@ async function handleRegenerateMessage({ messageId, messageIndex, newContent, at
   let chunkCount = 0
   
   try {
-    const response = await fetch(`/api/sessions/${currentSessionId.value}/messages/${messageId}/regenerate`, {
+    const response = await authFetch(`/api/sessions/${currentSessionId.value}/messages/${messageId}/regenerate`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -2187,7 +2189,7 @@ function handleBeforeUnload(event) {
   if (isRecording.value) {
     console.log('⚠️ [页面卸载] 检测到页面即将卸载，停止录音')
     // 发送停止请求（使用 sendBeacon 确保在页面卸载时也能发送）
-    navigator.sendBeacon('/api/recording/stop')
+    authFetch('/api/recording/stop', { method: 'POST', keepalive: true }).catch(() => {})
     isRecording.value = false
     // 显示确认对话框（某些浏览器会显示）
     event.preventDefault()
@@ -2211,10 +2213,10 @@ onMounted(async () => {
   await loadSessions()  // 加载会话列表
   
   // 首次使用时显示设置
-  const hasConfig = localStorage.getItem('hasConfig')
+  const hasConfig = userStorage.getItem('hasConfig')
   if (!hasConfig) {
     showSettings.value = true
-    localStorage.setItem('hasConfig', 'true')
+    userStorage.setItem('hasConfig', 'true')
   }
   
   // 添加键盘事件监听
@@ -2230,7 +2232,7 @@ onMounted(async () => {
   window.addEventListener('popstate', handlePopState)
   
   // 显示快捷键提示（仅首次）
-  const hasSeenHotkeyTip = localStorage.getItem('hasSeenHotkeyTip')
+  const hasSeenHotkeyTip = userStorage.getItem('hasSeenHotkeyTip')
   if (!hasSeenHotkeyTip) {
     const hotkeyConfig = config.value.hotkey?.local_toggle || 'alt+e'
     const hotkeyDisplay = hotkeyConfig.split('+').map(k => 
@@ -2239,7 +2241,7 @@ onMounted(async () => {
     
     setTimeout(() => {
       showNotification(`💡 提示：按 ${hotkeyDisplay} 可以快速开始/停止录音`, 'info', 5000)
-      localStorage.setItem('hasSeenHotkeyTip', 'true')
+      userStorage.setItem('hasSeenHotkeyTip', 'true')
     }, 2000)
   }
 })

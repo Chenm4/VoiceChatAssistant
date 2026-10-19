@@ -353,6 +353,8 @@
 </template>
 
 <script setup>
+import { userStorage, authFetch, privateUrl } from '../utils/auth'
+
 import { AudioLines, MessageSquare, Mic, ScanLine } from 'lucide-vue-next'
 import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { captureReadingPosition as capturePosition, restoreReadingPosition as restorePosition } from '../utils/scrollPosition'
@@ -457,7 +459,7 @@ function rerunSelectedModel(index, message, targetModel = null, effort) {
 
 function attachmentUrl(attachment) {
   if (!props.currentSessionId || !attachment?.id) return ''
-  return `/api/attachments/${encodeURIComponent(props.currentSessionId)}/${encodeURIComponent(attachment.id)}`
+  return privateUrl(`/api/attachments/${encodeURIComponent(props.currentSessionId)}/${encodeURIComponent(attachment.id)}`)
 }
 
 const previewImageUrl = ref('')
@@ -589,7 +591,7 @@ let editingImageUploads = 0
 
 function releaseUnusedEditingImage(id, sessionId = editingSessionId.value) {
   if (!sessionId || !id) return
-  fetch(`/api/attachments/${encodeURIComponent(sessionId)}/${encodeURIComponent(id)}`, {
+  authFetch(privateUrl(`/api/attachments/${encodeURIComponent(sessionId)}/${encodeURIComponent(id)}`), {
     method: 'DELETE'
   }).catch(error => console.warn('清理未使用图片失败:', error))
 }
@@ -666,7 +668,7 @@ const resizeState = ref(null)
 
 function loadMultiModelPreferences() {
   try {
-    const raw = localStorage.getItem(MULTI_MODEL_PREFERENCES_KEY)
+    const raw = userStorage.getItem(MULTI_MODEL_PREFERENCES_KEY)
     if (!raw) {
       multiModelPreferences.value = { ...DEFAULT_MULTI_MODEL_PREFERENCES }
       return
@@ -682,7 +684,7 @@ function loadMultiModelPreferences() {
 }
 
 function saveMultiModelPreferences() {
-  localStorage.setItem(MULTI_MODEL_PREFERENCES_KEY, JSON.stringify(multiModelPreferences.value))
+  userStorage.setItem(MULTI_MODEL_PREFERENCES_KEY, JSON.stringify(multiModelPreferences.value))
   window.dispatchEvent(new CustomEvent('multi-model-preferences-updated', {
     detail: multiModelPreferences.value
   }))
@@ -781,7 +783,7 @@ async function saveEdit(index) {
     }
     
     // 否则只是更新消息
-    const response = await fetch(`/api/sessions/${props.currentSessionId}/messages/${messageId}`, {
+    const response = await authFetch(`/api/sessions/${props.currentSessionId}/messages/${messageId}`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json'
@@ -840,7 +842,7 @@ async function buildAttachmentCopyData(attachments = []) {
     const absoluteUrl = new URL(relativeUrl, window.location.origin).href
     let imageUrl = absoluteUrl
     try {
-      const response = await fetch(relativeUrl)
+      const response = await authFetch(relativeUrl)
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       imageUrl = await blobToDataUrl(await response.blob())
     } catch (error) {
@@ -943,7 +945,7 @@ async function deleteMessages(indices) {
       return message.id || `msg_${index}` // 兼容旧数据
     })
     
-    const response = await fetch(`/api/sessions/${props.currentSessionId}/messages/delete`, {
+    const response = await authFetch(`/api/sessions/${props.currentSessionId}/messages/delete`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'

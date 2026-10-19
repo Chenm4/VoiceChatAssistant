@@ -1,3 +1,4 @@
+from backend.test.workspace_case import WorkspaceTestCase
 import base64
 import hashlib
 import unittest
@@ -7,7 +8,7 @@ from backend.api import routes
 from backend.api.models import ConfigSource
 
 
-class ProviderRequestPreviewTests(unittest.TestCase):
+class ProviderRequestPreviewTests(WorkspaceTestCase):
     def test_request_preview_keeps_history_and_options_without_image_data_or_keys(self):
         image = b"example image bytes"
         encoded = base64.b64encode(image).decode("ascii")

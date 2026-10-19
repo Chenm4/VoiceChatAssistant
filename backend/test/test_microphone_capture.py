@@ -1,3 +1,4 @@
+from backend.test.workspace_case import WorkspaceAsyncTestCase
 import asyncio
 import unittest
 from unittest.mock import Mock, patch
@@ -5,7 +6,7 @@ from unittest.mock import Mock, patch
 from backend.services.streaming_asr import StreamingASR
 
 
-class MicrophoneCaptureTests(unittest.IsolatedAsyncioTestCase):
+class MicrophoneCaptureTests(WorkspaceAsyncTestCase):
     async def capture(self, pcm, selected_index=None):
         asr = StreamingASR(preload=True)
         asr.input_device_index = selected_index

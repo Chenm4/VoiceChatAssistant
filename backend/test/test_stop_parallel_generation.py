@@ -1,3 +1,4 @@
+from backend.test.workspace_case import WorkspaceAsyncTestCase, user_state
 import asyncio
 import unittest
 from types import SimpleNamespace
@@ -7,7 +8,7 @@ from backend.api import routes
 from backend.api.models import ChatMessage, ChatRequest, RegenerateMessageRequest, Session, SessionConfig
 
 
-class StopParallelGenerationTests(unittest.IsolatedAsyncioTestCase):
+class StopParallelGenerationTests(WorkspaceAsyncTestCase):
     async def test_disconnect_closes_every_model_stream_for_chat_and_regenerate(self):
         for regenerate in (False, True):
             with self.subTest(regenerate=regenerate):
@@ -49,8 +50,8 @@ class StopParallelGenerationTests(unittest.IsolatedAsyncioTestCase):
                     async def close(self):
                         self.closed = True
 
-                with patch.object(routes.session_storage, 'load_session', return_value=session), \
-                     patch.object(routes.session_storage, 'save_session', return_value=True), \
+                with patch.object(user_state().session_storage, 'load_session', return_value=session), \
+                     patch.object(user_state().session_storage, 'save_session', return_value=True), \
                      patch.object(routes, 'resolve_model_targets', return_value=targets), \
                      patch.object(routes, 'AsyncOpenAI', Client), \
                      patch.object(routes, 'log_model_request_context'), \

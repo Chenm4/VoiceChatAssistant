@@ -1,5 +1,7 @@
 """Persistent batch runner for Qwen interview-answer prompt experiments."""
 
+from backend.services.user_workspace import user_path, user_state, workspace
+
 import asyncio
 import json
 import re
@@ -10,20 +12,10 @@ from typing import Any, Dict, List
 
 from openai import AsyncOpenAI
 
-from config import OPENAI_CONFIG
 
 
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data" / "runs"
-PROMPT_HISTORY_DIR = BASE_DIR / "data" / "prompt_history"
-PROMPTS_FILE = BASE_DIR / "prompts.json"
-QUESTIONS_FILE = BASE_DIR / "questions.json"
-BACKGROUND_FILE = BASE_DIR / "background.json"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-PROMPT_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 
-_tasks: Dict[str, asyncio.Task] = {}
-_locks: Dict[str, asyncio.Lock] = {}
 
 
 def _read_json(path: Path) -> Any:
@@ -40,18 +32,18 @@ def _write_json(path: Path, payload: Any) -> None:
 
 def get_catalog() -> Dict[str, Any]:
     sources = []
-    for source in OPENAI_CONFIG:
+    for source in [source.dict() for source in user_state().config_sources]:
         qwen_models = [model for model in source.get("models", []) if model.lower().startswith("qwen")]
         if qwen_models and source.get("api_key"):
             sources.append({"name": source["name"], "models": qwen_models})
     return {
         "prompts": [
             {"version": 1, **prompt}
-            for prompt in _read_json(PROMPTS_FILE)
+            for prompt in _read_json(user_path('prompt_lab/prompts.json'))
         ],
-        "questions": _read_json(QUESTIONS_FILE),
+        "questions": _read_json(user_path('prompt_lab/questions.json')),
         "sources": sources,
-        "background": _read_json(BACKGROUND_FILE),
+        "background": _read_json(user_path('prompt_lab/background.json')),
     }
 
 
@@ -62,7 +54,7 @@ def save_background(content: str) -> Dict[str, Any]:
         "content": str(content or "").strip(),
         "updated_at": int(time.time()),
     }
-    _write_json(BACKGROUND_FILE, payload)
+    _write_json(user_path('prompt_lab/background.json'), payload)
     return payload
 
 
@@ -79,7 +71,7 @@ def compose_lab_system_prompt(rules: str, background: str) -> str:
 
 def save_prompt(payload: Dict[str, Any], prompt_id: str = "") -> Dict[str, Any]:
     """Create or update a prompt while retaining the previous version on disk."""
-    prompts = _read_json(PROMPTS_FILE)
+    prompts = _read_json(user_path('prompt_lab/prompts.json'))
     name = str(payload.get("name", "")).strip()
     description = str(payload.get("description", "")).strip()
     system_prompt = str(payload.get("system_prompt", "")).strip()
@@ -91,12 +83,14 @@ def save_prompt(payload: Dict[str, Any], prompt_id: str = "") -> Dict[str, Any]:
 
     now = int(time.time())
     if prompt_id:
+        if not re.fullmatch(r'[A-Za-z0-9_-]+', prompt_id):
+            raise ValueError('提示词 ID 非法')
         index = next((i for i, item in enumerate(prompts) if item.get("id") == prompt_id), None)
         if index is None:
             raise KeyError(prompt_id)
         previous = prompts[index]
         previous_version = int(previous.get("version", 1))
-        history_file = PROMPT_HISTORY_DIR / f"{prompt_id}_v{previous_version}_{now}.json"
+        history_file = user_path('prompt_lab/data/prompt_history') / f"{prompt_id}_v{previous_version}_{now}.json"
         _write_json(history_file, {**previous, "version": previous_version})
         saved = {
             **previous,
@@ -125,7 +119,7 @@ def save_prompt(payload: Dict[str, Any], prompt_id: str = "") -> Dict[str, Any]:
         }
         prompts.append(saved)
 
-    _write_json(PROMPTS_FILE, prompts)
+    _write_json(user_path('prompt_lab/prompts.json'), prompts)
     return saved
 
 
@@ -133,12 +127,12 @@ def list_prompt_history(prompt_id: str) -> List[Dict[str, Any]]:
     if not re.fullmatch(r"[A-Za-z0-9_-]+", prompt_id):
         raise ValueError("提示词 ID 非法")
     history = []
-    for path in PROMPT_HISTORY_DIR.glob(f"{prompt_id}_v*.json"):
+    for path in user_path('prompt_lab/data/prompt_history').glob(f"{prompt_id}_v*.json"):
         try:
             history.append(_read_json(path))
         except (OSError, json.JSONDecodeError):
             continue
-    current = next((item for item in _read_json(PROMPTS_FILE) if item.get("id") == prompt_id), None)
+    current = next((item for item in _read_json(user_path('prompt_lab/prompts.json')) if item.get("id") == prompt_id), None)
     if not current:
         raise KeyError(prompt_id)
     history.append({"version": 1, **current})
@@ -146,7 +140,7 @@ def list_prompt_history(prompt_id: str) -> List[Dict[str, Any]]:
 
 
 def _source_by_name(name: str) -> Dict[str, Any]:
-    source = next((item for item in OPENAI_CONFIG if item.get("name") == name), None)
+    source = next((item for item in [source.dict() for source in user_state().config_sources] if item.get("name") == name), None)
     if not source:
         raise ValueError(f"配置源不存在: {name}")
     if not source.get("api_key"):
@@ -157,7 +151,7 @@ def _source_by_name(name: str) -> Dict[str, Any]:
 def _run_path(run_id: str) -> Path:
     if not run_id or any(char not in "0123456789abcdef-" for char in run_id.lower()):
         raise ValueError("实验 ID 非法")
-    return DATA_DIR / f"{run_id}.json"
+    return user_path('prompt_lab/data/runs') / f"{run_id}.json"
 
 
 def load_run(run_id: str) -> Dict[str, Any]:
@@ -169,7 +163,7 @@ def load_run(run_id: str) -> Dict[str, Any]:
 
 def list_runs() -> List[Dict[str, Any]]:
     summaries = []
-    for path in sorted(DATA_DIR.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+    for path in sorted(user_path('prompt_lab/data/runs').glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
         try:
             run = _read_json(path)
         except (OSError, json.JSONDecodeError):
@@ -284,8 +278,8 @@ def create_run(payload: Dict[str, Any]) -> Dict[str, Any]:
         "items": items,
     }
     _write_json(_run_path(run_id), run)
-    _locks[run_id] = asyncio.Lock()
-    _tasks[run_id] = asyncio.create_task(_execute_run(run_id, source))
+    workspace().locks[run_id] = asyncio.Lock()
+    workspace().tasks[run_id] = asyncio.create_task(_execute_run(run_id, source))
     return run
 
 
@@ -314,7 +308,7 @@ async def _execute_run(run_id: str, source: Dict[str, Any]) -> None:
                 answer, status, error = "", "failed", str(exc)
             latency_ms = int((time.monotonic() - started) * 1000)
 
-            async with _locks[run_id]:
+            async with workspace().locks[run_id]:
                 latest = load_run(run_id)
                 target = latest["items"][item_index]
                 target.update({
@@ -330,17 +324,17 @@ async def _execute_run(run_id: str, source: Dict[str, Any]) -> None:
 
     try:
         await asyncio.gather(*(execute_item(index) for index in range(len(run["items"]))))
-        async with _locks[run_id]:
+        async with workspace().locks[run_id]:
             latest = load_run(run_id)
             latest["status"] = "completed" if latest["failed"] == 0 else "completed_with_errors"
             latest["finished_at"] = int(time.time())
             _write_json(_run_path(run_id), latest)
     finally:
-        _tasks.pop(run_id, None)
+        workspace().tasks.pop(run_id, None)
 
 
 async def update_review(run_id: str, item_id: str, rating: Any, note: str) -> Dict[str, Any]:
-    lock = _locks.setdefault(run_id, asyncio.Lock())
+    lock = workspace().locks.setdefault(run_id, asyncio.Lock())
     async with lock:
         run = load_run(run_id)
         item = next((entry for entry in run["items"] if entry["id"] == item_id), None)

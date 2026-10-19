@@ -1,5 +1,7 @@
 """Session prompt snapshots and dynamically shared interview background."""
 
+from backend.services.user_workspace import user_path, user_state, user_config
+
 import json
 import logging
 from pathlib import Path
@@ -8,11 +10,10 @@ from typing import Any, Dict, Optional
 from backend.api.models import Session, SessionConfig, ModelTarget
 
 
-logger = logging.getLogger(__name__)
+from backend.utils.logger import get_api_logger
+logger = get_api_logger()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-PROMPTS_FILE = PROJECT_ROOT / "prompt_lab" / "prompts.json"
-BACKGROUND_FILE = PROJECT_ROOT / "prompt_lab" / "background.json"
 DEFAULT_SESSION_PROMPT_ID = "spoken_keypoints"
 
 
@@ -46,7 +47,7 @@ def load_prompt_template_snapshot(
     keep the exact template version they selected even when the lab template is
     edited later.
     """
-    catalog = _read_json(PROMPTS_FILE)
+    catalog = _read_json(user_path('prompt_lab/prompts.json'))
     if not isinstance(catalog, list):
         raise ValueError("提示词模板文件格式错误")
 
@@ -72,14 +73,19 @@ def load_prompt_template_snapshot(
 
 def create_default_session_config() -> SessionConfig:
     """Create the config used only for newly created sessions."""
-    prompt = load_prompt_template_snapshot()
+    try:
+        prompt = load_prompt_template_snapshot()
+    except ValueError:
+        # A new user has no inherited prompt, background, or model choices.
+        return SessionConfig(source_name=user_state().current_config.current_source,
+                             models=[], model_targets=[], system_prompt='', background_mode='none')
+    defaults = user_config('DEFAULT_SESSION_CONFIG') or {
+        'source_name': user_state().current_config.current_source,
+        'models': [user_state().current_config.current_model] if user_state().current_config.current_model else [],
+        'model_targets': [],
+    }
     return SessionConfig(
-        source_name='通义千问',
-        models=['qwen3.8-max', 'qwen3.7-plus'],
-        model_targets=[
-            ModelTarget(source_name='通义千问', model='qwen3.8-max', reasoning_effort='none'),
-            ModelTarget(source_name='通义千问', model='qwen3.7-plus', reasoning_effort='low'),
-        ],
+        **defaults,
         system_prompt=prompt["system_prompt"],
         prompt_template_id=prompt["id"],
         prompt_template_version=prompt["version"],
@@ -91,12 +97,12 @@ def create_default_session_config() -> SessionConfig:
 def load_shared_background() -> str:
     """Read the current shared background from disk for every model request."""
     try:
-        payload = _read_json(BACKGROUND_FILE)
+        payload = _read_json(user_path('prompt_lab/background.json'))
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("读取共享面试背景失败: %s", exc)
         return ""
     if not isinstance(payload, dict):
-        logger.warning("共享面试背景文件格式错误: %s", BACKGROUND_FILE)
+        logger.warning("共享面试背景文件格式错误: %s", user_path('prompt_lab/background.json'))
         return ""
     return str(payload.get("content") or "")
 

@@ -1,3 +1,4 @@
+from backend.test.workspace_case import WorkspaceAsyncTestCase, user_state
 import asyncio
 import time
 import unittest
@@ -6,7 +7,7 @@ from backend.services.streaming_asr import StreamingASR
 from backend.api import routes
 
 
-class RecordingMeterTests(unittest.IsolatedAsyncioTestCase):
+class RecordingMeterTests(WorkspaceAsyncTestCase):
     async def capture(self, frames, devices=None):
         asr = StreamingASR(preload=True)
         asr.is_recording = True
@@ -61,7 +62,7 @@ class RecordingMeterTests(unittest.IsolatedAsyncioTestCase):
         asr.audio_level = .6
         asr.raw_peak = 2000
         asr.last_audio_at = time.monotonic()
-        with patch.object(routes, 'streaming_asr', asr):
+        with patch.object(user_state(), 'streaming_asr', asr):
             self.assertEqual((await routes.get_recording_status())['audio_level'], .6)
             asr.last_audio_at -= 1
             self.assertEqual((await routes.get_recording_status())['audio_level'], 0)
@@ -74,7 +75,7 @@ class RecordingMeterTests(unittest.IsolatedAsyncioTestCase):
         asr.is_recording = True
         asr.recording_start_time = time.time() - 5
         asr.input_device_name = 'Mic'
-        with patch.object(routes, 'streaming_asr', asr):
+        with patch.object(user_state(), 'streaming_asr', asr):
             self.assertIn('Mic', (await routes.get_recording_status())['capture_warning'])
             asr.raw_peak = 2000
             self.assertIsNone((await routes.get_recording_status())['capture_warning'])

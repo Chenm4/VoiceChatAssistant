@@ -1,3 +1,4 @@
+from backend.test.workspace_case import WorkspaceAsyncTestCase
 import asyncio
 import queue
 import unittest
@@ -15,7 +16,7 @@ class Stream:
     def stop_stream(self): pass
     def close(self): self.closed = True
 
-class DualInputTests(unittest.IsolatedAsyncioTestCase):
+class DualInputTests(WorkspaceAsyncTestCase):
     async def wait_for(self, check):
         for _ in range(100):
             if check(): return

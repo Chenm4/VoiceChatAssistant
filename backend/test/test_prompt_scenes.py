@@ -1,3 +1,4 @@
+from backend.test.workspace_case import WorkspaceTestCase, user_state, patch_path
 import asyncio
 import json
 import tempfile
@@ -11,7 +12,7 @@ from backend.services import prompt_scenes
 from backend.services.session_prompt import compose_session_system_prompt, render_session_user_prompt
 
 
-class PromptSceneTests(unittest.TestCase):
+class PromptSceneTests(WorkspaceTestCase):
     def test_exam_buttons_have_independent_rules_and_restore_default(self):
         scenes = prompt_scenes.exam_scenes()
         self.assertEqual([scene.name for scene in scenes], ['笔试专用', 'AI Coding 提问助手'])
@@ -47,7 +48,7 @@ class PromptSceneTests(unittest.TestCase):
         self.assertEqual(render_session_user_prompt(session, 'question'), 'OLD question')
 
     def test_catalog_round_trip_and_session_snapshot(self):
-        with tempfile.TemporaryDirectory() as directory, patch.object(prompt_scenes, 'CATALOG_PATH', Path(directory) / 'scenes.json'):
+        with tempfile.TemporaryDirectory() as directory, patch_path(prompt_scenes, 'prompt_scenes.json', Path(directory) / 'scenes.json'):
             self.assertTrue(prompt_scenes.load_catalog().scenes)
             catalog = SceneCatalog(scenes=[PromptScene(id='project', name='项目', background='资料')])
             prompt_scenes.save_catalog(catalog)
@@ -73,8 +74,8 @@ class PromptSceneTests(unittest.TestCase):
             response = await routes.regenerate_message(session.id, 'q', RegenerateMessageRequest(message_id='q', new_content='Question', preserve_answer=True))
             return [part async for part in response.body_iterator]
 
-        with patch.object(routes.session_storage, 'load_session', return_value=session), \
-             patch.object(routes.session_storage, 'save_session', return_value=True), \
+        with patch.object(user_state().session_storage, 'load_session', return_value=session), \
+             patch.object(user_state().session_storage, 'save_session', return_value=True), \
              patch.object(routes, 'resolve_model_targets', return_value=[target]), \
              patch.object(routes, 'OpenAI', return_value=completion), \
              patch.object(routes, '_multimodal_user_content', side_effect=lambda sid, content, images: content) as multimodal, \
@@ -108,9 +109,9 @@ class PromptSceneTests(unittest.TestCase):
         config.active_scene.rules = 'new scene rules'
         config.active_scene.background = 'new project facts'
         with tempfile.TemporaryDirectory() as directory, \
-             patch.object(prompt_scenes, 'CATALOG_PATH', Path(directory) / 'scenes.json'), \
-             patch.object(routes.session_storage, 'load_session', return_value=session), \
-             patch.object(routes.session_storage, 'save_session', return_value=True):
+             patch_path(prompt_scenes, 'prompt_scenes.json', Path(directory) / 'scenes.json'), \
+             patch.object(user_state().session_storage, 'load_session', return_value=session), \
+             patch.object(user_state().session_storage, 'save_session', return_value=True):
             prompt_scenes.save_catalog(SceneCatalog(scenes=[scene]))
             asyncio.run(routes.update_session_config(session.id, config))
             stored = prompt_scenes.load_catalog().scenes[0]
@@ -139,9 +140,9 @@ class PromptSceneTests(unittest.TestCase):
             async for part in response.body_iterator:
                 if 'stale answer' in part:
                     # A new scene supersedes this request while its stream is alive.
-                    routes.generation_epochs[session.id] = 'new-scene'
-        with patch.object(routes.session_storage, 'load_session', return_value=session), \
-             patch.object(routes.session_storage, 'save_session', return_value=True) as save, \
+                    user_state().generation_epochs[session.id] = 'new-scene'
+        with patch.object(user_state().session_storage, 'load_session', return_value=session), \
+             patch.object(user_state().session_storage, 'save_session', return_value=True) as save, \
              patch.object(routes, 'resolve_model_targets', return_value=[target]), \
              patch.object(routes, 'OpenAI', return_value=completion), \
              patch.object(routes, 'log_model_request_context'), \

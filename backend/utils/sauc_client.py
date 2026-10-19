@@ -33,12 +33,10 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent.parent))
 from backend.utils.logger import get_asr_logger
-from config import BYTEDANCE_ASR_CONFIG
+from backend.services.user_workspace import user_config
 
 logger = get_asr_logger()
 
-# 从 config.py 创建全局 config 对象
-config = None  # 将在模块加载时初始化
 
 # 常量定义
 DEFAULT_SAMPLE_RATE = 16000
@@ -82,11 +80,7 @@ class Config:
     def access_key(self) -> str:
         return self.auth["access_key"]
 
-# 从 config.py 创建全局 config 对象
-config = Config(
-    app_key=BYTEDANCE_ASR_CONFIG['app_key'],
-    access_key=BYTEDANCE_ASR_CONFIG['access_key']
-)
+
 
 class CommonUtils:
     @staticmethod
@@ -209,8 +203,8 @@ class RequestBuilder:
         return {
             "X-Api-Resource-Id": "volc.bigasr.sauc.duration",
             "X-Api-Request-Id": reqid,
-            "X-Api-Access-Key": config.access_key,
-            "X-Api-App-Key": config.app_key
+            "X-Api-Access-Key": user_config('BYTEDANCE_ASR_CONFIG')['access_key'],
+            "X-Api-App-Key": user_config('BYTEDANCE_ASR_CONFIG')['app_key']
         }
 
     @staticmethod

@@ -54,7 +54,6 @@ from backend.services.session_prompt import (
     create_default_session_config,
     render_session_user_prompt,
 )
-from backend.services.session_storage import session_storage
 from backend.utils.logger import get_api_logger
 from backend.utils.chat_logger import (
     log_model_interaction,
@@ -64,31 +63,9 @@ from backend.utils.id_generator import generate_session_id
 from openai import OpenAI, AsyncOpenAI
 import time
 
-# 导入配置
-try:
-    from config import OPENAI_CONFIG, DEFAULT_CONFIG_NAME, CHAT_CONTEXT_CONFIG
-except ImportError:
-    OPENAI_CONFIG = [
-        {
-            "name": "OpenAI",
-            "api_key": "",
-            "models": ["gpt-3.5-turbo", "gpt-4"],
-            "base_url": "https://api.openai.com/v1"
-        }
-    ]
-    DEFAULT_CONFIG_NAME = "OpenAI"
-    CHAT_CONTEXT_CONFIG = {
-        "max_history_turns": 15,
-        "max_history_chars": 12000,
-        "include_assistant_history": False,
-        "debug_context": True,
-        "debug_context_full": False,
-        "debug_preview_chars": 160,
-    }
+from backend.services.user_workspace import user_state, user_path, user_config, workspace
 
 logger = get_api_logger()
-VOICE_DIR = Path(__file__).parent.parent.parent / "data" / "voices"
-SCREENSHOT_DIR = Path(__file__).parent.parent.parent / "data" / "screenshots"
 MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024
 SCREENSHOT_MIME_EXTENSIONS = {
     "image/png": ".png",
@@ -191,7 +168,7 @@ def log_model_request_context(
     console; set ``CHAT_DEBUG_CONTEXT_FULL=1`` when full message bodies are
     needed for a local debugging session.
     """
-    if not CHAT_CONTEXT_CONFIG.get("debug_context", True):
+    if not user_config('CHAT_CONTEXT_CONFIG').get("debug_context", True):
         return
 
     total_chars = sum(_content_text_length(message.get("content", "")) for message in messages)
@@ -207,7 +184,7 @@ def log_model_request_context(
                  if isinstance(part, dict) and part.get("type") == "text")
         for message in messages
     )
-    context_settings = context_settings or CHAT_CONTEXT_CONFIG
+    context_settings = context_settings or user_config('CHAT_CONTEXT_CONFIG')
     logger.info(
         f"📨 [模型请求上下文] label={label}, model={model}, "
         f"messages={len(messages)} (system={system_count}, user={user_count}, "
@@ -218,8 +195,8 @@ def log_model_request_context(
         f"include_assistant={context_settings.get('include_assistant_history', False)}"
     )
 
-    preview_chars = CHAT_CONTEXT_CONFIG.get("debug_preview_chars", 160)
-    show_full = CHAT_CONTEXT_CONFIG.get("debug_context_full", False)
+    preview_chars = user_config('CHAT_CONTEXT_CONFIG').get("debug_preview_chars", 160)
+    show_full = user_config('CHAT_CONTEXT_CONFIG').get("debug_context_full", False)
     for index, message in enumerate(messages, 1):
         role = message.get("role", "unknown")
         content = message.get("content", "")
@@ -233,8 +210,8 @@ def log_model_request_context(
 def resolve_chat_context_config(session_config: Optional[SessionConfig]) -> Dict[str, Any]:
     """Resolve global context defaults with optional per-session overrides."""
     settings = {
-        "max_history_turns": CHAT_CONTEXT_CONFIG.get("max_history_turns", 15),
-        "max_history_chars": CHAT_CONTEXT_CONFIG.get("max_history_chars", 12000),
+        "max_history_turns": user_config('CHAT_CONTEXT_CONFIG').get("max_history_turns", 15),
+        "max_history_chars": user_config('CHAT_CONTEXT_CONFIG').get("max_history_chars", 12000),
         "include_assistant_history": False,
     }
     if session_config is not None:
@@ -320,93 +297,10 @@ def trim_history_context(
 
 # 创建路由器
 router = APIRouter()
-# Invalidate outstanding generations when a newer request/config takes over.
-generation_epochs: Dict[str, str] = {}
-
-# 全局服务实例
-audio_recorder = AudioRecorder()
-voice_recognizer = VoiceRecognizer()
-streaming_asr = None  # 实时流式识别实例（每次录音时使用）
-streaming_asr_pool = None  # 预热实例池（启动时创建）
-openai_client = None
-
-# 从 config.py 读取初始配置
-config_sources = [ConfigSource(**source) for source in OPENAI_CONFIG]
-
-# 找到默认配置源
-default_source = next((s for s in config_sources if s.name == DEFAULT_CONFIG_NAME), config_sources[0])
-current_config = ConfigList(
-    sources=config_sources,
-    current_source=default_source.name,
-    current_model=default_source.models[0] if default_source.models else "gpt-3.5-turbo"
-)
-
-
-# 将配置写回 config.py 文件
 def save_config_to_file():
-    """将当前配置源列表写回 config.py 文件"""
-    try:
-        config_path = Path(__file__).parent.parent.parent / "config.py"
-        
-        # 读取原文件内容
-        with open(config_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        # 构建新的 OPENAI_CONFIG
-        config_list = []
-        for source in config_sources:
-            config_dict = {
-                "name": source.name,
-                "api_key": source.api_key,
-                "models": source.models,
-                "base_url": source.base_url
-            }
-            config_list.append(config_dict)
-        
-        # 格式化为 Python 代码
-        config_lines = []
-        config_lines.append("OPENAI_CONFIG = [")
-        for i, source in enumerate(config_sources):
-            config_lines.append("    {")
-            config_lines.append(f'        "name": "{source.name}",')
-            # 如果 API key 为空，添加注释
-            if "api.xiaomimimo.com" in source.base_url:
-                from backend.services.provider_secrets import save_xiaomi_key
-                save_xiaomi_key(source.api_key)
-                config_lines.append('        "api_key": load_xiaomi_key(),')
-            elif source.api_key:
-                config_lines.append(f'        "api_key": "{source.api_key}",')
-            else:
-                config_lines.append(f'        "api_key": "",  # 填写您的 {source.name} API Key')
-            config_lines.append(f'        "models": {json.dumps(source.models, ensure_ascii=False)},')
-            config_lines.append(f'        "base_url": "{source.base_url}"')
-            if i < len(config_sources) - 1:
-                config_lines.append("    },")
-            else:
-                config_lines.append("    }")
-        config_lines.append("]")
-        new_config_block = "\n".join(config_lines)
-        
-        # 使用正则表达式替换 OPENAI_CONFIG 部分
-        pattern = r'OPENAI_CONFIG = \[[\s\S]*?\n\]'
-        new_content = re.sub(pattern, new_config_block, content)
-        
-        # 写回文件
-        with open(config_path, 'w', encoding='utf-8') as f:
-            f.write(new_content)
-        
-        logger.info(f"配置已保存到 config.py")
-        return True
-    except Exception as e:
-        logger.error(f"保存配置到文件失败: {e}", exc_info=True)
-        return False
-
-# 向后兼容的单一配置
-api_config = ConfigModel(
-    api_key=default_source.api_key,
-    model=current_config.current_model,
-    base_url=default_source.base_url
-)
+    """Persist only the authenticated user's configuration."""
+    workspace().save_config()
+    return True
 
 
 async def iterate_provider_stream(stream):
@@ -456,7 +350,7 @@ def get_chat_completion_extra_params(
 ) -> Dict[str, Any]:
     """Return provider-specific Chat Completions options."""
     source_name = (source.name if source else "").lower()
-    base_url = (source.base_url if source else api_config.base_url).lower()
+    base_url = (source.base_url if source else user_state().api_config.base_url).lower()
     model_name = (model or "").lower()
     effort = reasoning_effort if reasoning_effort in {
         "none", "minimal", "low", "medium", "high", "xhigh"
@@ -513,7 +407,7 @@ def resolve_model_targets(
             )]
         else:
             matching_source = next(
-                (source for source in config_sources if requested_model in source.models),
+                (source for source in user_state().config_sources if requested_model in source.models),
                 None,
             )
             if not matching_source:
@@ -536,12 +430,12 @@ def resolve_model_targets(
             for target in session_config.model_targets
         ]
     elif session_config and session_config.models:
-        legacy_source = session_config.source_name or current_config.current_source
+        legacy_source = session_config.source_name or user_state().current_config.current_source
         requested_targets = [
             (legacy_source, model_name, "none") for model_name in session_config.models
         ]
     else:
-        requested_targets = [(current_config.current_source, api_config.model, "none")]
+        requested_targets = [(user_state().current_config.current_source, user_state().api_config.model, "none")]
 
     resolved = []
     seen = set()
@@ -549,7 +443,7 @@ def resolve_model_targets(
         key = f"{source_name}::{model_name}"
         if key in seen:
             continue
-        source = next((item for item in config_sources if item.name == source_name), None)
+        source = next((item for item in user_state().config_sources if item.name == source_name), None)
         if not source:
             raise HTTPException(status_code=400, detail=f"配置源 {source_name} 不存在")
         if model_name not in source.models:
@@ -591,12 +485,6 @@ def public_model_targets(targets: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         for target in targets
     ]
 
-# ==================== 会话管理全局状态 ====================
-# 使用新的存储架构：按月分组存储，索引与内容分离
-current_session_id: str = None  # 当前活动的会话 ID
-current_session_cache: Session = None  # 当前会话缓存（避免频繁读取磁盘）
-
-
 def init_default_session() -> Session:
     """
     初始化默认会话（首次启动或会话为空时调用）
@@ -606,7 +494,6 @@ def init_default_session() -> Session:
     Returns:
         Session: 新创建的会话对象
     """
-    global current_session_id, current_session_cache
     
     session_id = generate_session_id()
     current_time = int(time.time())
@@ -621,12 +508,12 @@ def init_default_session() -> Session:
     )
     
     # 保存到磁盘（自动按月分组）
-    session_storage.save_session(default_session)
-    session_storage.set_current_session(session_id)
+    user_state().session_storage.save_session(default_session)
+    user_state().session_storage.set_current_session(session_id)
     
     # 更新全局状态
-    current_session_id = session_id
-    current_session_cache = default_session
+    user_state().current_session_id = session_id
+    user_state().current_session_cache = default_session
     
     logger.info(f"创建默认会话: {session_id}")
     return default_session
@@ -639,18 +526,17 @@ def load_initial_state():
     从磁盘加载会话索引，恢复上次的会话状态
     如果没有会话，自动创建默认会话
     """
-    global current_session_id
     
     # 加载轻量级索引（不包含消息内容）
-    index_list = session_storage.load_index()
+    index_list = user_state().session_storage.load_index()
     
     if not index_list.sessions:
         logger.info("未找到已保存的会话，创建默认会话")
         init_default_session()
     else:
         # 恢复上次的当前会话
-        current_session_id = index_list.current_session_id or index_list.sessions[0].id
-        logger.info(f"加载会话索引: {len(index_list.sessions)} 个，当前会话: {current_session_id}")
+        user_state().current_session_id = index_list.current_session_id or index_list.sessions[0].id
+        logger.info(f"加载会话索引: {len(index_list.sessions)} 个，当前会话: {user_state().current_session_id}")
 
 
 def get_current_session() -> Session:
@@ -658,17 +544,18 @@ def get_current_session() -> Session:
     Always load the latest version before mutating a session. Chat streams and
     recording updates save independently, so the memory cache can be stale.
     """
-    global current_session_cache
 
-    session = session_storage.load_session(current_session_id)
+    if not user_state().current_session_id:
+        return init_default_session()
+    session = user_state().session_storage.load_session(user_state().current_session_id)
     
     if not session:
         # 会话不存在（可能被外部删除），创建新会话
-        logger.warning(f"当前会话 {current_session_id} 不存在，创建新会话")
+        logger.warning(f"当前会话 {user_state().current_session_id} 不存在，创建新会话")
         return init_default_session()
     
     # 更新缓存
-    current_session_cache = session
+    user_state().current_session_cache = session
     return session
 
 
@@ -678,16 +565,16 @@ def save_current_session():
     
     自动更新索引中的消息数量统计和更新时间
     """
-    if current_session_cache:
-        session_storage.save_session(current_session_cache)
-        logger.debug(f"保存会话: {current_session_cache.id}")
+    if user_state().current_session_cache:
+        user_state().session_storage.save_session(user_state().current_session_cache)
+        logger.debug(f"保存会话: {user_state().current_session_cache.id}")
 
 
 def _screenshot_session_dir(session_id: str) -> Path:
     """Return the private screenshot directory for one validated session id."""
     if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
         raise HTTPException(status_code=400, detail="无效的会话 ID")
-    directory = SCREENSHOT_DIR / session_id
+    directory = user_path('screenshots') / session_id
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 
@@ -709,7 +596,7 @@ def _delete_screenshot_files(
     """Delete only screenshot files inside one validated session directory."""
     if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
         return
-    directory = SCREENSHOT_DIR / session_id
+    directory = user_path('screenshots') / session_id
     if not directory.is_dir():
         return
     allowed_ids = set(attachment_ids) if attachment_ids is not None else None
@@ -786,21 +673,20 @@ def _multimodal_user_content(
 
 def attach_recording_to_session(session_id: Optional[str], audio_file: Optional[str]) -> None:
     """Persist the generated WAV filename on the session that started recording."""
-    global current_session_cache
 
     if not session_id or not audio_file:
         return
 
     audio_path = Path(audio_file).resolve()
     try:
-        audio_path.relative_to(VOICE_DIR.resolve())
+        audio_path.relative_to(user_path('voices').resolve())
     except ValueError:
         logger.warning(f"忽略 voices 目录之外的录音文件: {audio_path}")
         return
 
     # An answer may have been saved since the cached session was read. Merge
     # the WAV into the disk version to avoid erasing newer messages.
-    session = session_storage.load_session(session_id)
+    session = user_state().session_storage.load_session(session_id)
     if not session:
         logger.warning(f"录音对应的会话不存在: {session_id}")
         return
@@ -808,9 +694,9 @@ def attach_recording_to_session(session_id: Optional[str], audio_file: Optional[
     if audio_path.name not in session.audio_files:
         session.audio_files.append(audio_path.name)
         session.updated_at = int(time.time())
-        session_storage.save_session(session)
-        if session_id == current_session_id:
-            current_session_cache = session
+        user_state().session_storage.save_session(session)
+        if session_id == user_state().current_session_id:
+            user_state().current_session_cache = session
         logger.info(f"录音已关联到会话: session={session_id}, file={audio_path.name}")
 
 
@@ -824,41 +710,17 @@ def get_conversation_history() -> List[ChatMessage]:
     return get_current_session().messages
 
 
-# 服务启动时加载初始状态
-load_initial_state()
-
-# 如果配置了 API Key，自动初始化客户端
-if api_config.api_key:
-    try:
-        openai_client = OpenAI(
-            api_key=api_config.api_key,
-            base_url=api_config.base_url
-        )
-        logger.info(f"从 config.py 加载 OpenAI 配置成功: {current_config.current_source} - {current_config.current_model}")
-    except Exception as e:
-        logger.error(f"初始化 OpenAI 客户端失败: {e}")
-
-# 预热流式识别实例（应用启动时）
-try:
-    streaming_asr_pool = StreamingASR(preload=True)
-    streaming_asr_pool.prepare_audio_processing()
-    logger.info("🔥 [预热成功] 流式识别实例已预热，首次录音将更快启动")
-except Exception as e:
-    logger.warning(f"⚠️ [预热失败] 流式识别预热失败: {e}")
-
-
 async def preheat_next_instance():
     """预热下一个实例（后台任务）"""
-    global streaming_asr_pool
     try:
         # 短暂延迟，避免影响当前请求
         await asyncio.sleep(0.5)
         
-        if not streaming_asr_pool:  # 只有池为空时才预热
+        if not user_state().streaming_asr_pool:  # 只有池为空时才预热
             next_instance = StreamingASR(preload=True)
             await asyncio.to_thread(next_instance.prepare_audio_processing)
-            if not streaming_asr_pool:
-                streaming_asr_pool = next_instance
+            if not user_state().streaming_asr_pool:
+                user_state().streaming_asr_pool = next_instance
             logger.info("🔥 [预热完成] 下一个流式识别实例已预热")
     except Exception as e:
         logger.warning(f"⚠️ [预热失败] 后台预热失败: {e}")
@@ -876,12 +738,11 @@ async def get_config():
     """
     logger.info("获取配置列表")
     # 确保返回最新的 config_sources
-    current_config.sources = config_sources
+    user_state().current_config.sources = user_state().config_sources
     
     # 添加快捷键配置
-    from config import HOTKEY_CONFIG
-    result = current_config.dict()
-    result['hotkey'] = HOTKEY_CONFIG
+    result = user_state().current_config.dict()
+    result['hotkey'] = user_config('HOTKEY_CONFIG')
     
     return result
 
@@ -901,10 +762,9 @@ async def switch_config(source_name: str, model: str):
     Raises:
         HTTPException: 配置源不存在或模型不在列表中
     """
-    global openai_client, api_config, current_config
     
     # 1. 验证配置源是否存在
-    source = next((s for s in config_sources if s.name == source_name), None)
+    source = next((s for s in user_state().config_sources if s.name == source_name), None)
     if not source:
         logger.error(f"配置源不存在: {source_name}")
         raise HTTPException(status_code=404, detail=f"配置源 {source_name} 不存在")
@@ -918,11 +778,11 @@ async def switch_config(source_name: str, model: str):
         )
     
     # 3. 更新全局配置
-    current_config.current_source = source_name
-    current_config.current_model = model
+    user_state().current_config.current_source = source_name
+    user_state().current_config.current_model = model
     
     # 4. 更新向后兼容的配置对象
-    api_config = ConfigModel(
+    user_state().api_config = ConfigModel(
         api_key=source.api_key,
         model=model,
         base_url=source.base_url
@@ -931,11 +791,11 @@ async def switch_config(source_name: str, model: str):
     logger.info(f"切换全局配置: {source_name} - {model}")
     
     # 5. 重新初始化 OpenAI 客户端
-    if api_config.api_key:
+    if user_state().api_config.api_key:
         try:
-            openai_client = OpenAI(
-                api_key=api_config.api_key,
-                base_url=api_config.base_url
+            user_state().openai_client = OpenAI(
+                api_key=user_state().api_config.api_key,
+                base_url=user_state().api_config.base_url
             )
             logger.info("OpenAI 客户端重新初始化成功")
         except Exception as e:
@@ -944,6 +804,7 @@ async def switch_config(source_name: str, model: str):
     else:
         logger.warning(f"配置源 {source_name} 没有 API Key")
     
+    save_config_to_file()
     return {
         "success": True, 
         "message": f"已切换到 {source_name} - {model}"
@@ -953,27 +814,26 @@ async def switch_config(source_name: str, model: str):
 @router.post("/config/update")
 async def update_config_source(source: ConfigSource):
     """更新某个配置源（如修改 API Key）"""
-    global config_sources, current_config, api_config, openai_client
     
     # 查找并更新配置源
-    for i, s in enumerate(config_sources):
+    for i, s in enumerate(user_state().config_sources):
         if s.name == source.name:
-            config_sources[i] = source
+            user_state().config_sources[i] = source
             logger.info(f"更新配置源: {source.name}")
             
             # 如果是当前使用的配置源，更新 api_config 和客户端
-            if current_config.current_source == source.name:
-                api_config = ConfigModel(
+            if user_state().current_config.current_source == source.name:
+                user_state().api_config = ConfigModel(
                     api_key=source.api_key,
-                    model=current_config.current_model,
+                    model=user_state().current_config.current_model,
                     base_url=source.base_url
                 )
                 
-                if api_config.api_key:
+                if user_state().api_config.api_key:
                     try:
-                        openai_client = OpenAI(
-                            api_key=api_config.api_key,
-                            base_url=api_config.base_url
+                        user_state().openai_client = OpenAI(
+                            api_key=user_state().api_config.api_key,
+                            base_url=user_state().api_config.base_url
                         )
                         logger.info("OpenAI 客户端重新初始化成功")
                     except Exception as e:
@@ -992,16 +852,15 @@ async def update_config_source(source: ConfigSource):
 @router.post("/config")
 async def save_config(config: ConfigModel):
     """保存 API 配置（向后兼容接口）"""
-    global openai_client, api_config
     
-    api_config = config
+    user_state().api_config = config
     
     logger.info(f"保存配置: base_url={config.base_url}, model={config.model}")
     
     # 初始化 OpenAI 客户端
     if config.api_key:
         try:
-            openai_client = OpenAI(
+            user_state().openai_client = OpenAI(
                 api_key=config.api_key,
                 base_url=config.base_url
             )
@@ -1010,23 +869,23 @@ async def save_config(config: ConfigModel):
             logger.error(f"OpenAI 客户端初始化失败: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
     
+    save_config_to_file()
     return {"success": True, "message": "配置已保存"}
 
 
 @router.post("/config/add")
 async def add_config_source(source: ConfigSource):
     """新增配置源"""
-    global config_sources
     
     # 检查是否已存在同名配置源
-    if any(s.name == source.name for s in config_sources):
+    if any(s.name == source.name for s in user_state().config_sources):
         logger.error(f"配置源已存在: {source.name}")
         raise HTTPException(status_code=400, detail=f"配置源 {source.name} 已存在")
     
     # 添加配置源
-    config_sources.append(source)
+    user_state().config_sources.append(source)
     # 同步更新 current_config.sources
-    current_config.sources = config_sources
+    user_state().current_config.sources = user_state().config_sources
     logger.info(f"新增配置源: {source.name}")
     
     # 保存到文件
@@ -1039,15 +898,14 @@ async def add_config_source(source: ConfigSource):
 @router.delete("/config/source/{source_name}")
 async def delete_config_source(source_name: str):
     """删除配置源"""
-    global config_sources, current_config
     
     # 至少保留一个配置源
-    if len(config_sources) <= 1:
+    if len(user_state().config_sources) <= 1:
         logger.error("至少需要保留一个配置源")
         raise HTTPException(status_code=400, detail="至少需要保留一个配置源")
     
     # 不能删除当前正在使用的配置源
-    if current_config.current_source == source_name:
+    if user_state().current_config.current_source == source_name:
         logger.error(f"不能删除当前正在使用的配置源: {source_name}")
         raise HTTPException(
             status_code=400, 
@@ -1055,15 +913,15 @@ async def delete_config_source(source_name: str):
         )
     
     # 查找并删除配置源
-    original_length = len(config_sources)
-    config_sources[:] = [s for s in config_sources if s.name != source_name]
+    original_length = len(user_state().config_sources)
+    user_state().config_sources[:] = [s for s in user_state().config_sources if s.name != source_name]
     
-    if len(config_sources) == original_length:
+    if len(user_state().config_sources) == original_length:
         logger.error(f"配置源不存在: {source_name}")
         raise HTTPException(status_code=404, detail=f"配置源 {source_name} 不存在")
     
     # 同步更新 current_config.sources
-    current_config.sources = config_sources
+    user_state().current_config.sources = user_state().config_sources
     
     logger.info(f"删除配置源: {source_name}")
     
@@ -1098,7 +956,6 @@ def get_recording_devices():
 @router.post("/recording/start")
 async def start_recording(request: Optional[RecordingStartRequest] = None):
     """开始录音 - 实时流式模式（支持预热加速）"""
-    global streaming_asr, streaming_asr_pool
     
     start_time = time.time()
     logger.info(f"🟢 [开始录音] 收到请求 - {time.strftime('%H:%M:%S', time.localtime(start_time))}.{int((start_time % 1) * 1000)}")
@@ -1108,9 +965,9 @@ async def start_recording(request: Optional[RecordingStartRequest] = None):
     
     try:
         # 如果已经有正在进行的录音，先清理
-        if streaming_asr:
+        if user_state().streaming_asr:
             logger.warning("⚠️ [清理旧实例] 检测到旧的录音实例，先清理...")
-            previous_asr = streaming_asr
+            previous_asr = user_state().streaming_asr
             try:
                 await previous_asr.stop_streaming()
                 attach_recording_to_session(
@@ -1119,13 +976,13 @@ async def start_recording(request: Optional[RecordingStartRequest] = None):
                 )
             except:
                 pass
-            streaming_asr = None
+            user_state().streaming_asr = None
         
         # 使用预热的实例（如果可用）
-        if streaming_asr_pool:
+        if user_state().streaming_asr_pool:
             logger.info("🔥 [使用预热实例] 使用预热的实例，加速启动...")
-            temp_asr = streaming_asr_pool
-            streaming_asr_pool = None  # 清空池
+            temp_asr = user_state().streaming_asr_pool
+            user_state().streaming_asr_pool = None  # 清空池
             
             # 异步预热下一个实例（不阻塞当前请求）
             asyncio.create_task(preheat_next_instance())
@@ -1135,7 +992,7 @@ async def start_recording(request: Optional[RecordingStartRequest] = None):
             temp_asr = StreamingASR()
 
         # Capture ownership now so later session switches cannot reassign audio.
-        temp_asr.session_id = current_session_id
+        temp_asr.session_id = user_state().current_session_id
         temp_asr.input_device_index = request.input_device_index if request else None
         temp_asr.requested_device_name = request.input_device_name if request else None
         if request:
@@ -1173,7 +1030,7 @@ async def start_recording(request: Optional[RecordingStartRequest] = None):
             raise Exception(f"启动任务失败: {error}")
         
         # 录音已经开始，连接将在后台建立 - 只有成功后才设置全局变量
-        streaming_asr = temp_asr
+        user_state().streaming_asr = temp_asr
         
         elapsed = (time.time() - start_time) * 1000
         logger.info(f"✅ [录音已启动] 总耗时: {elapsed:.2f}ms")
@@ -1203,10 +1060,10 @@ async def start_recording(request: Optional[RecordingStartRequest] = None):
 
 @router.post('/recording/switch-input')
 async def switch_recording_input(request: RecordingStartRequest):
-    if not streaming_asr or not streaming_asr.is_recording:
+    if not user_state().streaming_asr or not user_state().streaming_asr.is_recording:
         raise HTTPException(status_code=409, detail='当前未在识别')
     try:
-        device = await streaming_asr.switch_input(request.input_device_index, request.input_device_name, request.input_source, mix_inputs=request.mix_inputs)
+        device = await user_state().streaming_asr.switch_input(request.input_device_index, request.input_device_name, request.input_source, mix_inputs=request.mix_inputs)
         return {'success': True, 'input_source': request.input_source, 'input_device_name': device['name']}
     except Exception as error:
         raise HTTPException(status_code=400, detail=str(error))
@@ -1215,9 +1072,8 @@ async def switch_recording_input(request: RecordingStartRequest):
 @router.get("/recording/status")
 async def get_recording_status():
     """获取录音状态"""
-    global streaming_asr
     
-    if not streaming_asr:
+    if not user_state().streaming_asr:
         return {
             "is_recording": False,
             "auto_stopped": False,
@@ -1228,27 +1084,27 @@ async def get_recording_status():
         }
     
     return {
-        "is_recording": streaming_asr.is_recording,
-        "auto_stopped": streaming_asr.auto_stopped,
+        "is_recording": user_state().streaming_asr.is_recording,
+        "auto_stopped": user_state().streaming_asr.auto_stopped,
         "audio_level": (
-            streaming_asr.audio_level
-            if streaming_asr.is_recording and time.monotonic() - streaming_asr.last_audio_at < 0.5
+            user_state().streaming_asr.audio_level
+            if user_state().streaming_asr.is_recording and time.monotonic() - user_state().streaming_asr.last_audio_at < 0.5
             else 0.0
         ),
-        "input_device_name": streaming_asr.input_device_name,
-        "input_source": getattr(streaming_asr, 'input_source', 'microphone'),
-        "error": streaming_asr.error_message,
+        "input_device_name": user_state().streaming_asr.input_device_name,
+        "input_source": getattr(user_state().streaming_asr, 'input_source', 'microphone'),
+        "error": user_state().streaming_asr.error_message,
         "capture_warning": (
-            f'麦克风「{streaming_asr.input_device_name}」尚未采集到声音，请检查设备、静音和麦克风权限'
-            if streaming_asr.is_recording and streaming_asr.recording_start_time
-            and time.time() - streaming_asr.recording_start_time > 4
-            and streaming_asr.raw_peak == 0 else None
+            f'麦克风「{user_state().streaming_asr.input_device_name}」尚未采集到声音，请检查设备、静音和麦克风权限'
+            if user_state().streaming_asr.is_recording and user_state().streaming_asr.recording_start_time
+            and time.time() - user_state().streaming_asr.recording_start_time > 4
+            and user_state().streaming_asr.raw_peak == 0 else None
         ),
         # Soniox emits hypotheses while audio is still being sent. Expose
         # the latest one so the UI can render the live transcript.
         "partial_text": (
-            streaming_asr.partial_text
-            or streaming_asr.result_text
+            user_state().streaming_asr.partial_text
+            or user_state().streaming_asr.result_text
             or ""
         ),
     }
@@ -1257,21 +1113,20 @@ async def get_recording_status():
 @router.post("/recording/stop")
 async def stop_recording(finalize: bool = True):
     """停止录音并获取识别结果 - 实时流式模式"""
-    global streaming_asr
     
     request_start_time = time.time()
     logger.info(f"🔴 [停止录音] 收到请求 - {time.strftime('%H:%M:%S', time.localtime(request_start_time))}.{int((request_start_time % 1) * 1000)}")
     
     try:
-        if not streaming_asr:
+        if not user_state().streaming_asr:
             logger.warning("⚠️ [无录音] 没有正在进行的录音")
             logger.warning("⚠️ [状态检查] streaming_asr 为 None，可能是启动失败或已经停止")
             return RecordingResponse(success=False, message="没有正在进行的录音，请先点击开始录音")
         
         # 保存实例引用，防止并发请求导致的问题
-        current_asr = streaming_asr
+        current_asr = user_state().streaming_asr
         # 立即清空全局变量，防止重复调用
-        streaming_asr = None
+        user_state().streaming_asr = None
         
         # 停止流式识别并获取结果
         logger.info("🛑 [停止识别] 调用 stop_streaming()...")
@@ -1310,7 +1165,7 @@ async def upload_screenshot(
     screenshot: UploadFile = File(...),
 ):
     """Validate and store a browser-tab screenshot for a chat message."""
-    if not session_storage.load_session(session_id):
+    if not user_state().session_storage.load_session(session_id):
         raise HTTPException(status_code=404, detail="会话不存在")
 
     data = await screenshot.read(MAX_SCREENSHOT_BYTES + 1)
@@ -1343,7 +1198,7 @@ async def upload_screenshot(
 @router.get("/attachments/{session_id}/{attachment_id}")
 async def get_screenshot(session_id: str, attachment_id: str):
     """Serve a screenshot that belongs to a local chat session."""
-    if not session_storage.load_session(session_id):
+    if not user_state().session_storage.load_session(session_id):
         raise HTTPException(status_code=404, detail="会话不存在")
     path = _find_screenshot(session_id, attachment_id)
     media_type = {
@@ -1358,7 +1213,7 @@ async def get_screenshot(session_id: str, attachment_id: str):
 @router.delete("/attachments/{session_id}/{attachment_id}")
 async def delete_unused_screenshot(session_id: str, attachment_id: str):
     """Discard an uploaded image that was never attached to a saved message."""
-    session = session_storage.load_session(session_id)
+    session = user_state().session_storage.load_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
     if any(
@@ -1382,12 +1237,12 @@ async def chat(request: ChatRequest):
     # Explicit session ownership prevents a tab capture from landing in a
     # different session if the user switches conversations while uploading.
     if request.session_id:
-        current_session = session_storage.load_session(request.session_id)
+        current_session = user_state().session_storage.load_session(request.session_id)
         if not current_session:
             raise HTTPException(status_code=404, detail="会话不存在")
     else:
         current_session = get_current_session()
-    chat_epoch = generation_epochs.get(current_session.id)
+    chat_epoch = user_state().generation_epochs.get(current_session.id)
     session_config = current_session.session_config
     message_attachments = _load_message_attachments(
         current_session.id, request.attachment_ids
@@ -1430,14 +1285,14 @@ async def chat(request: ChatRequest):
 
     # Persist the question before streaming so another screenshot can start
     # immediately and see it. There is no await between load/save below.
-    if not session_storage.save_session(current_session):
+    if not user_state().session_storage.save_session(current_session):
         raise HTTPException(status_code=500, detail="保存问题失败")
 
     def save_chat_answer(assistant_msg: ChatMessage) -> None:
         """Merge this answer into the latest session instead of a stale snapshot."""
-        if generation_epochs.get(current_session.id) != chat_epoch:
+        if user_state().generation_epochs.get(current_session.id) != chat_epoch:
             raise asyncio.CancelledError()
-        latest_session = session_storage.load_session(current_session.id)
+        latest_session = user_state().session_storage.load_session(current_session.id)
         if not latest_session:
             raise RuntimeError("会话已被删除，无法保存回答")
         for index, message in enumerate(latest_session.messages):
@@ -1446,7 +1301,7 @@ async def chat(request: ChatRequest):
                     message.children_ids.append(assistant_msg.id)
                 latest_session.messages.insert(index + 1, assistant_msg)
                 latest_session.updated_at = int(time.time())
-                if not session_storage.save_session(latest_session):
+                if not user_state().session_storage.save_session(latest_session):
                     raise RuntimeError("保存回答失败")
                 return
         raise RuntimeError("找不到本次问题，无法保存回答")
@@ -1983,7 +1838,7 @@ async def clear_chat():
     """清空当前会话的对话历史"""
     current_session = get_current_session()
     
-    logger.info(f"清空会话 {current_session_id} 的对话历史")
+    logger.info(f"清空会话 {user_state().current_session_id} 的对话历史")
     _delete_screenshot_files(current_session.id)
     current_session.messages = []
     current_session.updated_at = int(time.time())
@@ -2020,7 +1875,9 @@ async def get_sessions():
     logger.info("获取会话列表")
     
     # 加载轻量级索引（不包含消息内容）
-    index_list = session_storage.load_index()
+    if not user_state().current_session_id:
+        init_default_session()
+    index_list = user_state().session_storage.load_index()
     
     # 按 updated_at 降序排序（最新的在最上面）
     sorted_sessions = sorted(
@@ -2033,7 +1890,7 @@ async def get_sessions():
     
     return SessionIndexList(
         sessions=sorted_sessions,
-        current_session_id=current_session_id
+        current_session_id=user_state().current_session_id
     ).dict()
 
 
@@ -2053,7 +1910,6 @@ async def create_session(title: str = "新对话"):
         - 自动添加到会话索引中
         - 设置为当前活动会话
     """
-    global current_session_id, current_session_cache
     
     try:
         session_id = generate_session_id()
@@ -2070,17 +1926,17 @@ async def create_session(title: str = "新对话"):
         )
         
         # 保存到磁盘（自动按月分组）
-        if not session_storage.save_session(new_session):
+        if not user_state().session_storage.save_session(new_session):
             logger.error(f"保存会话失败: {session_id}")
             raise HTTPException(status_code=500, detail="保存会话失败")
         
         # 设置为当前会话
-        if not session_storage.set_current_session(session_id):
+        if not user_state().session_storage.set_current_session(session_id):
             logger.error(f"设置当前会话失败: {session_id}")
             raise HTTPException(status_code=500, detail="设置当前会话失败")
         
-        current_session_id = session_id
-        current_session_cache = new_session
+        user_state().current_session_id = session_id
+        user_state().current_session_cache = new_session
         
         logger.info(f"创建新会话: {session_id} - {title}")
         
@@ -2116,7 +1972,7 @@ async def get_session(session_id: str):
     logger.info(f"获取会话详情: {session_id}")
     
     # 从磁盘加载完整会话内容
-    session = session_storage.load_session(session_id)
+    session = user_state().session_storage.load_session(session_id)
     
     if not session:
         logger.warning(f"会话不存在: {session_id}")
@@ -2129,7 +1985,7 @@ async def get_session(session_id: str):
 @router.get("/sessions/{session_id}/audio/merged")
 async def merge_session_audio(session_id: str):
     """Concatenate all WAV recordings associated with a session, in order."""
-    session = session_storage.load_session(session_id)
+    session = user_state().session_storage.load_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
     if not session.audio_files:
@@ -2140,9 +1996,9 @@ async def merge_session_audio(session_id: str):
     frames = []
 
     for filename in session.audio_files:
-        audio_path = (VOICE_DIR / Path(filename).name).resolve()
+        audio_path = (user_path('voices') / Path(filename).name).resolve()
         try:
-            audio_path.relative_to(VOICE_DIR.resolve())
+            audio_path.relative_to(user_path('voices').resolve())
         except ValueError:
             logger.warning(f"跳过不安全的录音路径: {filename}")
             continue
@@ -2211,27 +2067,26 @@ async def switch_session(session_id: str):
         - 更新全局当前会话 ID
         - 刷新会话缓存
     """
-    global current_session_id, current_session_cache
     
     logger.info(f"切换会话: {session_id}")
     
     # 从磁盘加载会话
-    session = session_storage.load_session(session_id)
+    session = user_state().session_storage.load_session(session_id)
     
     if not session:
         logger.warning(f"会话不存在: {session_id}")
         raise HTTPException(status_code=404, detail="会话不存在")
     
     # 更新全局状态
-    current_session_id = session_id
-    current_session_cache = session
+    user_state().current_session_id = session_id
+    user_state().current_session_cache = session
     
     # 更新访问时间
     session.updated_at = int(time.time())
-    session_storage.save_session(session)
+    user_state().session_storage.save_session(session)
     
     # 设置为当前会话
-    session_storage.set_current_session(session_id)
+    user_state().session_storage.set_current_session(session_id)
     
     logger.info(f"切换成功: {session.title}")
     
@@ -2264,7 +2119,7 @@ async def update_session_title(session_id: str, title: str):
     logger.info(f"更新会话标题: {session_id} -> {title}")
     
     # 从磁盘加载会话
-    session = session_storage.load_session(session_id)
+    session = user_state().session_storage.load_session(session_id)
     
     if not session:
         logger.warning(f"会话不存在: {session_id}")
@@ -2275,12 +2130,11 @@ async def update_session_title(session_id: str, title: str):
     session.updated_at = int(time.time())
     
     # 保存（自动更新索引）
-    session_storage.save_session(session)
+    user_state().session_storage.save_session(session)
     
     # 如果是当前会话，更新缓存
-    global current_session_cache
-    if session_id == current_session_id and current_session_cache:
-        current_session_cache = session
+    if session_id == user_state().current_session_id and user_state().current_session_cache:
+        user_state().current_session_cache = session
     
     logger.info(f"标题更新成功: {session_id}")
     
@@ -2313,12 +2167,11 @@ async def delete_session(session_id: str):
         - 如果删除的是当前会话，自动切换到其他会话
         - 至少保留一个会话（不允许删除最后一个）
     """
-    global current_session_id, current_session_cache
     
     logger.info(f"删除会话: {session_id}")
     
     # 1. 检查会话是否存在
-    index_list = session_storage.load_index()
+    index_list = user_state().session_storage.load_index()
     if not any(s.id == session_id for s in index_list.sessions):
         logger.warning(f"会话不存在: {session_id}")
         raise HTTPException(status_code=404, detail="会话不存在")
@@ -2329,17 +2182,17 @@ async def delete_session(session_id: str):
         raise HTTPException(status_code=400, detail="至少需要保留一个会话")
     
     # 3. 如果删除的是当前会话，切换到其他会话
-    if session_id == current_session_id:
+    if session_id == user_state().current_session_id:
         for s in index_list.sessions:
             if s.id != session_id:
-                current_session_id = s.id
-                current_session_cache = None  # 清除缓存，强制重新加载
-                session_storage.set_current_session(current_session_id)
-                logger.info(f"切换到新会话: {current_session_id}")
+                user_state().current_session_id = s.id
+                user_state().current_session_cache = None  # 清除缓存，强制重新加载
+                user_state().session_storage.set_current_session(user_state().current_session_id)
+                logger.info(f"切换到新会话: {user_state().current_session_id}")
                 break
     
     # 4. 执行删除操作（删除文件和索引）
-    if session_storage.delete_session(session_id):
+    if user_state().session_storage.delete_session(session_id):
         _delete_screenshot_files(session_id)
         logger.info(f"会话删除成功: {session_id}")
     else:
@@ -2349,7 +2202,7 @@ async def delete_session(session_id: str):
     return {
         "success": True,
         "message": "会话删除成功",
-        "current_session_id": current_session_id
+        "current_session_id": user_state().current_session_id
     }
 
 
@@ -2368,7 +2221,7 @@ async def update_message(session_id: str, message_id: str, request: MessageUpdat
     Returns:
         dict: 更新结果
     """
-    session = session_storage.load_session(session_id)
+    session = user_state().session_storage.load_session(session_id)
     
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
@@ -2419,7 +2272,7 @@ async def update_message(session_id: str, message_id: str, request: MessageUpdat
         raise HTTPException(status_code=404, detail="消息不存在")
     
     session.updated_at = int(time.time())
-    session_storage.save_session(session)
+    user_state().session_storage.save_session(session)
     if removed_attachment_ids:
         _delete_screenshot_files(session_id, _unreferenced_attachment_ids(session, removed_attachment_ids))
     
@@ -2452,7 +2305,7 @@ async def delete_messages(session_id: str, request: BatchDeleteMessageRequest):
     Returns:
         dict: 删除结果
     """
-    session = session_storage.load_session(session_id)
+    session = user_state().session_storage.load_session(session_id)
     
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
@@ -2484,7 +2337,7 @@ async def delete_messages(session_id: str, request: BatchDeleteMessageRequest):
     _delete_screenshot_files(session_id, attachment_ids_to_delete)
     
     session.updated_at = int(time.time())
-    session_storage.save_session(session)
+    user_state().session_storage.save_session(session)
     
     logger.info(f"删除消息: session={session_id}, count={deleted_count}, ids={request.message_ids}")
     
@@ -2564,7 +2417,7 @@ async def update_session_config(session_id: str, config: SessionConfig):
     logger.info(f"更新会话配置: {session_id}")
     
     # 从磁盘加载会话
-    session = session_storage.load_session(session_id)
+    session = user_state().session_storage.load_session(session_id)
     
     if not session:
         logger.warning(f"会话不存在: {session_id}")
@@ -2573,7 +2426,7 @@ async def update_session_config(session_id: str, config: SessionConfig):
     if config.model_targets:
         for target in config.model_targets:
             source = next(
-                (item for item in config_sources if item.name == target.source_name),
+                (item for item in user_state().config_sources if item.name == target.source_name),
                 None,
             )
             if not source or target.model not in source.models:
@@ -2597,19 +2450,18 @@ async def update_session_config(session_id: str, config: SessionConfig):
         catalog.scenes = [config.active_scene if item.id == config.active_scene.id else item for item in catalog.scenes]
         save_catalog(catalog)
 
-    generation_epochs[session_id] = uuid.uuid4().hex
+    user_state().generation_epochs[session_id] = uuid.uuid4().hex
     # 更新会话配置
     session.session_config = config
     session.updated_at = int(time.time())
     
     # 保存到磁盘
-    if not session_storage.save_session(session):
+    if not user_state().session_storage.save_session(session):
         raise HTTPException(status_code=500, detail="保存会话配置失败")
     
     # 如果是当前会话，更新缓存（重要：必须更新，否则下次聊天会使用旧配置）
-    global current_session_cache
-    if session_id == current_session_id:
-        current_session_cache = session
+    if session_id == user_state().current_session_id:
+        user_state().current_session_cache = session
         logger.info(f"已更新当前会话缓存: {session_id}")
     
     logger.info(
@@ -2650,7 +2502,7 @@ async def insert_system_prompt(session_id: str, request: InsertSystemPromptReque
         在某条消息后插入："现在请用英语回答"
         后续对话会使用新的系统提示词
     """
-    session = session_storage.load_session(session_id)
+    session = user_state().session_storage.load_session(session_id)
     
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
@@ -2684,12 +2536,11 @@ async def insert_system_prompt(session_id: str, request: InsertSystemPromptReque
     session.updated_at = current_time
     
     # 保存
-    session_storage.save_session(session)
+    user_state().session_storage.save_session(session)
     
     # 如果是当前会话，更新缓存
-    global current_session_cache
-    if session_id == current_session_id and current_session_cache:
-        current_session_cache = session
+    if session_id == user_state().current_session_id and user_state().current_session_cache:
+        user_state().current_session_cache = session
     
     logger.info(f"插入系统提示词: session={session_id}, parent_id={request.parent_id}")
     
@@ -2716,7 +2567,7 @@ async def get_session_config(session_id: str):
     """
     logger.info(f"获取会话配置: {session_id}")
     
-    session = session_storage.load_session(session_id)
+    session = user_state().session_storage.load_session(session_id)
     
     if not session:
         logger.warning(f"会话不存在: {session_id}")
@@ -2755,7 +2606,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
     logger.info(f"重新生成消息: session={session_id}, message_id={message_id}")
     
     # 加载会话
-    session = session_storage.load_session(session_id)
+    session = user_state().session_storage.load_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
     
@@ -2778,12 +2629,12 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
         raise HTTPException(status_code=400, detail="场景重答必须保留原始问题和附件")
 
     generation_epoch = uuid.uuid4().hex
-    generation_epochs[session_id] = generation_epoch
+    user_state().generation_epochs[session_id] = generation_epoch
 
     def save_current_generation():
-        if generation_epochs.get(session_id) != generation_epoch:
+        if user_state().generation_epochs.get(session_id) != generation_epoch:
             raise asyncio.CancelledError()
-        if not session_storage.save_session(session):
+        if not user_state().session_storage.save_session(session):
             raise RuntimeError("保存回答失败")
 
     session_config = session.session_config

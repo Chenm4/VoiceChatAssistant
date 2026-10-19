@@ -5,6 +5,8 @@
 使用 PyAudio 进行音频采集，录音文件保存为 WAV 格式。
 """
 
+from backend.services.user_workspace import user_config, user_path
+
 import sys
 import threading
 import wave
@@ -19,11 +21,9 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from backend.utils.logger import get_asr_logger
 from backend.services.noise_suppression import create_noise_suppressor
-from config import AUDIO_CONFIG
 
 
 # 常量定义
-VOICE_DIR = Path(__file__).parent.parent.parent / "data" / "voices"
 
 
 class AudioRecorder:
@@ -60,12 +60,13 @@ class AudioRecorder:
         self.stream: Optional[pyaudio.Stream] = None
         self.p: Optional[pyaudio.PyAudio] = None
         self.logger = get_asr_logger()
+        self.voice_dir = user_path('voices')
         
         # 音频参数
-        self.CHUNK: int = AUDIO_CONFIG['chunk']
+        self.CHUNK: int = user_config('AUDIO_CONFIG')['chunk']
         self.FORMAT = pyaudio.paInt16
-        self.CHANNELS: int = AUDIO_CONFIG['channels']
-        self.RATE: int = AUDIO_CONFIG['rate']
+        self.CHANNELS: int = user_config('AUDIO_CONFIG')['channels']
+        self.RATE: int = user_config('AUDIO_CONFIG')['rate']
         
         self.logger.info(
             f"初始化音频录制器: {self.CHANNELS}声道, "
@@ -178,12 +179,12 @@ class AudioRecorder:
             return None
         
         # 创建保存目录
-        VOICE_DIR.mkdir(parents=True, exist_ok=True)
+        self.voice_dir.mkdir(parents=True, exist_ok=True)
         
         # 生成带时间戳的文件名
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         audio_filename = f"voice_{timestamp}.wav"
-        audio_path = VOICE_DIR / audio_filename
+        audio_path = self.voice_dir / audio_filename
         
         # 保存音频文件
         with wave.open(str(audio_path), 'wb') as wf:

@@ -1,5 +1,7 @@
 """Checks for the microphone noise reduction path."""
 
+from backend.test.workspace_case import WorkspaceTestCase, workspace
+
 import logging
 import os
 import unittest
@@ -10,7 +12,7 @@ import numpy as np
 from backend.services.noise_suppression import NoiseSuppressor, create_noise_suppressor
 
 
-class NoiseSuppressionTests(unittest.TestCase):
+class NoiseSuppressionTests(WorkspaceTestCase):
     def test_streaming_chunks_preserve_length_and_reduce_noise(self):
         sample_rate = 16000
         rng = np.random.default_rng(42)
@@ -42,7 +44,7 @@ class NoiseSuppressionTests(unittest.TestCase):
         self.assertLess(after_noise, before_noise * 0.9)
 
     def test_can_disable_noise_reduction(self):
-        with patch.dict(os.environ, {"AUDIO_NOISE_REDUCTION": "off"}):
+        with patch.dict(workspace().settings['NOISE_REDUCTION'], {'enabled': False}):
             self.assertIsNone(create_noise_suppressor(16000, 1, logging.getLogger(__name__)))
 
     def test_rejects_partial_pcm_sample(self):

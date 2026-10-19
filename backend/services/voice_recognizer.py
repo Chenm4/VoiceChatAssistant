@@ -9,6 +9,8 @@
 2. 火山引擎或字节跳动 ASR（可选备用）
 """
 
+from backend.services.user_workspace import user_config, user_path
+
 import asyncio
 import json
 import sys
@@ -22,7 +24,6 @@ from backend.utils.asr_demo import AsrWsClient as VolcengineAsrClient, AudioType
 from backend.utils.logger import get_asr_logger
 from backend.utils.sauc_client import AsrWsClient as BytedanceAsrClient
 import websockets
-from config import ASR_CONFIG, BYTEDANCE_ASR_CONFIG, SONIOX_CONFIG, VOLCENGINE_CONFIG
 
 
 class VoiceRecognizer:
@@ -56,25 +57,26 @@ class VoiceRecognizer:
         从配置文件加载各 ASR 提供方的 API 配置。
         """
         self.logger = get_asr_logger()
-        self.provider: str = ASR_CONFIG.get('provider', 'soniox').lower()
-        self.fallback_provider: str = ASR_CONFIG.get('fallback_provider', 'volcengine').lower()
+        self.voice_dir = user_path('voices')
+        self.provider: str = user_config('ASR_CONFIG').get('provider', 'soniox').lower()
+        self.fallback_provider: str = user_config('ASR_CONFIG').get('fallback_provider', 'volcengine').lower()
         
         # 字节跳动配置（主要）
-        self.bd_app_key: str = BYTEDANCE_ASR_CONFIG['app_key']
-        self.bd_access_key: str = BYTEDANCE_ASR_CONFIG['access_key']
-        self.bd_url: str = BYTEDANCE_ASR_CONFIG['url']
-        self.bd_segment_duration: int = BYTEDANCE_ASR_CONFIG.get('segment_duration', 200)
+        self.bd_app_key: str = user_config('BYTEDANCE_ASR_CONFIG')['app_key']
+        self.bd_access_key: str = user_config('BYTEDANCE_ASR_CONFIG')['access_key']
+        self.bd_url: str = user_config('BYTEDANCE_ASR_CONFIG')['url']
+        self.bd_segment_duration: int = user_config('BYTEDANCE_ASR_CONFIG').get('segment_duration', 200)
         
         # 火山引擎配置（备用）
-        self.ve_appid: str = VOLCENGINE_CONFIG['appid']
-        self.ve_token: str = VOLCENGINE_CONFIG['token']
-        self.ve_cluster: str = VOLCENGINE_CONFIG['cluster']
+        self.ve_appid: str = user_config('VOLCENGINE_CONFIG')['appid']
+        self.ve_token: str = user_config('VOLCENGINE_CONFIG')['token']
+        self.ve_cluster: str = user_config('VOLCENGINE_CONFIG')['cluster']
         
         self.logger.info("初始化语音识别服务:")
         self.logger.info(f"  默认: {self.provider} | 备用: {self.fallback_provider}")
         self.logger.info(
-            f"  Soniox (api_key={'SET' if SONIOX_CONFIG.get('api_key') else 'EMPTY'}, "
-            f"host={SONIOX_CONFIG.get('api_host')}, model={SONIOX_CONFIG.get('model')})"
+            f"  Soniox (api_key={'SET' if user_config('SONIOX_CONFIG').get('api_key') else 'EMPTY'}, "
+            f"host={user_config('SONIOX_CONFIG').get('api_host')}, model={user_config('SONIOX_CONFIG').get('model')})"
         )
         self.logger.info(
             f"  主要: 字节跳动 ASR "
@@ -212,21 +214,21 @@ class VoiceRecognizer:
     async def recognize_with_soniox(self, audio_file: str) -> Tuple[Optional[str], Optional[str]]:
         """Recognize a WAV file through the Soniox Japan project endpoint."""
         self.logger.info(f"🎯 使用 Soniox ASR 识别: {audio_file}")
-        if not SONIOX_CONFIG.get('api_key'):
+        if not user_config('SONIOX_CONFIG').get('api_key'):
             return None, "Soniox API Key 未设置，请设置 SONIOX_API_KEY"
         try:
             with open(audio_file, 'rb') as audio_file_handle:
                 audio = audio_file_handle.read()
-            ws_url = SONIOX_CONFIG.get('ws_url', 'wss://stt-rt.jp.soniox.com/transcribe-websocket')
+            ws_url = user_config('SONIOX_CONFIG').get('ws_url', 'wss://stt-rt.jp.soniox.com/transcribe-websocket')
             config = {
-                'api_key': SONIOX_CONFIG['api_key'],
-                'model': SONIOX_CONFIG.get('model', 'stt-rt-v5'),
+                'api_key': user_config('SONIOX_CONFIG')['api_key'],
+                'model': user_config('SONIOX_CONFIG').get('model', 'stt-rt-v5'),
                 'audio_format': 'wav',
-                'language_hints': [SONIOX_CONFIG.get('language', 'zh')],
+                'language_hints': [user_config('SONIOX_CONFIG').get('language', 'zh')],
                 'enable_endpoint_detection': True,
             }
-            if SONIOX_CONFIG.get('context'):
-                config['context'] = SONIOX_CONFIG['context']
+            if user_config('SONIOX_CONFIG').get('context'):
+                config['context'] = user_config('SONIOX_CONFIG')['context']
             final_tokens = []
             async with websockets.connect(ws_url, max_size=1000000000) as ws:
                 await ws.send(json.dumps(config))

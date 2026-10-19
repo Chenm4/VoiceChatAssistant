@@ -1,3 +1,4 @@
+from backend.test.workspace_case import WorkspaceTestCase, user_state
 import asyncio
 import base64
 import json
@@ -39,8 +40,9 @@ class FakeUpstream:
         return await self.recv()
 
 
-class ManualRecordingTests(unittest.TestCase):
+class ManualRecordingTests(WorkspaceTestCase):
     def setUp(self):
+        super().setUp()
         app = FastAPI()
         app.include_router(router, prefix='/api')
         self.client = TestClient(app)
@@ -91,7 +93,7 @@ class ManualRecordingTests(unittest.TestCase):
     def test_unowned_recording_is_rejected(self):
         from types import SimpleNamespace
         from backend.api.doubao_realtime import load_recording
-        with patch('backend.api.doubao_realtime.session_storage.load_session', return_value=SimpleNamespace(audio_files=[])):
+        with patch.object(user_state().session_storage, 'load_session', return_value=SimpleNamespace(audio_files=[])):
             with self.assertRaises(ValueError):
                 load_recording(StartOptions(type='start', session_id='s', audio_file='other.wav', text='问题'))
 
@@ -106,7 +108,7 @@ class ManualRecordingTests(unittest.TestCase):
         self.assertNotIn('output_audio', response.json())
 
     def test_shared_prompt_composition(self):
-        with patch('backend.api.doubao_realtime.session_storage.load_session', return_value=object()), \
+        with patch.object(user_state().session_storage, 'load_session', return_value=object()), \
              patch('backend.api.doubao_realtime.compose_session_system_prompt', return_value='共享背景'), \
              patch('backend.api.doubao_realtime.render_session_user_prompt', return_value='场景规则'):
             self.assertEqual(session_instructions('s'), '共享背景\n\n场景规则')

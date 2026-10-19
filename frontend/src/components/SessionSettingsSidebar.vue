@@ -410,6 +410,8 @@
 </template>
 
 <script setup>
+import { userStorage } from '../utils/auth'
+
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { Setting, Close, InfoFilled, Select, Rank } from '@element-plus/icons-vue'
 import draggable from 'vuedraggable'
@@ -443,7 +445,7 @@ function setWidth(width, persist = true) {
   panelWidth.value = Math.round(Math.max(minimumWidth.value, Math.min(maximumWidth.value, width)))
   emit('resize', panelWidth.value)
   if (persist) {
-    try { localStorage.setItem(WIDTH_KEY, String(panelWidth.value)) } catch { /* Resizing still works without storage. */ }
+    try { userStorage.setItem(WIDTH_KEY, String(panelWidth.value)) } catch { /* Resizing still works without storage. */ }
   }
 }
 function resetWidth() { setWidth(370) }
@@ -477,7 +479,7 @@ function finishResize(event) {
 function fitViewport() { viewportWidth.value = window.innerWidth; setWidth(panelWidth.value, false) }
 onMounted(() => {
   let storedWidth = 370
-  try { storedWidth = Number(localStorage.getItem(WIDTH_KEY)) || 370 } catch { /* Use the default. */ }
+  try { storedWidth = Number(userStorage.getItem(WIDTH_KEY)) || 370 } catch { /* Use the default. */ }
   setWidth(Number.isFinite(storedWidth) ? storedWidth : 370, false)
   window.addEventListener('resize', fitViewport)
 })
@@ -750,7 +752,7 @@ const effectiveConfigSummary = computed(() => {
 
 function loadMultiModelPreferences() {
   try {
-    const raw = localStorage.getItem(MULTI_MODEL_PREFERENCES_KEY)
+    const raw = userStorage.getItem(MULTI_MODEL_PREFERENCES_KEY)
     const preferences = raw ? JSON.parse(raw) : DEFAULT_MULTI_MODEL_PREFERENCES
     multiModelDisplayMode.value = preferences.displayMode || DEFAULT_MULTI_MODEL_PREFERENCES.displayMode
     defaultDisplayModel.value = preferences.defaultModel || ''
@@ -764,7 +766,7 @@ function loadMultiModelPreferences() {
 function saveMultiModelPreferences() {
   let current = { ...DEFAULT_MULTI_MODEL_PREFERENCES }
   try {
-    const raw = localStorage.getItem(MULTI_MODEL_PREFERENCES_KEY)
+    const raw = userStorage.getItem(MULTI_MODEL_PREFERENCES_KEY)
     if (raw) {
       current = { ...current, ...JSON.parse(raw) }
     }
@@ -778,7 +780,7 @@ function saveMultiModelPreferences() {
     defaultModel: defaultDisplayModel.value || selectedModels.value[0] || ''
   }
   
-  localStorage.setItem(MULTI_MODEL_PREFERENCES_KEY, JSON.stringify(next))
+  userStorage.setItem(MULTI_MODEL_PREFERENCES_KEY, JSON.stringify(next))
   window.dispatchEvent(new CustomEvent('multi-model-preferences-updated', {
     detail: next
   }))

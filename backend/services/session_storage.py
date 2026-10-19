@@ -6,6 +6,7 @@
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
@@ -24,13 +25,16 @@ class SessionStorage:
     - data/storage/YYYY/MM/session_id.json: 按月分组的会话文件
     """
     
-    def __init__(self, base_dir: str = "data"):
+    def __init__(self, base_dir=None):
         """
         初始化会话存储
         
         Args:
             base_dir: 数据根目录
         """
+        if base_dir is None:
+            from backend.services.user_workspace import user_path
+            base_dir = user_path('.')
         self.base_dir = Path(base_dir)
         self.index_file = self.base_dir / "sessions_index.json"
         self.storage_dir = self.base_dir / "storage"
@@ -52,6 +56,8 @@ class SessionStorage:
         Returns:
             Path: 会话文件路径
         """
+        if not isinstance(session_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', session_id):
+            raise ValueError('无效的会话 ID')
         if not created_at:
             # 从索引中查找创建时间
             index = self.load_index()
@@ -69,7 +75,10 @@ class SessionStorage:
         year_month_dir = self.storage_dir / str(dt.year) / f"{dt.month:02d}"
         year_month_dir.mkdir(parents=True, exist_ok=True)
         
-        return year_month_dir / f"{session_id}.json"
+        path = (year_month_dir / f"{session_id}.json").resolve()
+        if not path.is_relative_to(self.base_dir.resolve()):
+            raise ValueError("会话路径越界")
+        return path
     
     def _get_storage_path_str(self, session_id: str, created_at: int) -> str:
         """
@@ -287,7 +296,3 @@ class SessionStorage:
         except Exception as e:
             logger.error(f"备份失败: {e}", exc_info=True)
             return False
-
-
-# 全局存储实例
-session_storage = SessionStorage()

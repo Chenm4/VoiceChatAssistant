@@ -1,5 +1,7 @@
 """Cold-start preparation must not capture audio or block API requests."""
 
+from backend.test.workspace_case import WorkspaceAsyncTestCase
+
 import asyncio
 import threading
 import unittest
@@ -8,7 +10,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from backend.services.streaming_asr import StreamingASR
 
 
-class RecordingStartupTests(unittest.IsolatedAsyncioTestCase):
+class RecordingStartupTests(WorkspaceAsyncTestCase):
     async def test_preparation_loads_filter_once_without_opening_microphone(self):
         asr = StreamingASR(preload=True)
         suppressor = Mock()

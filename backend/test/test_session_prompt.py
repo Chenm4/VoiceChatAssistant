@@ -1,3 +1,4 @@
+from backend.test.workspace_case import WorkspaceTestCase, patch_path
 import json
 import tempfile
 import unittest
@@ -19,7 +20,7 @@ def make_session(config: SessionConfig) -> Session:
     )
 
 
-class SessionPromptTests(unittest.TestCase):
+class SessionPromptTests(WorkspaceTestCase):
     def test_new_session_config_snapshots_latest_spoken_template(self):
         with tempfile.TemporaryDirectory() as directory:
             prompts_file = Path(directory) / "prompts.json"
@@ -38,7 +39,7 @@ class SessionPromptTests(unittest.TestCase):
                 },
             ], ensure_ascii=False), encoding="utf-8")
 
-            with patch.object(session_prompt, "PROMPTS_FILE", prompts_file):
+            with patch_path(session_prompt, 'prompt_lab/prompts.json', prompts_file):
                 config = session_prompt.create_default_session_config()
 
         self.assertEqual(config.prompt_template_id, "spoken_keypoints")
@@ -67,7 +68,7 @@ class SessionPromptTests(unittest.TestCase):
                 background_context="不应追加的旧背景字段",
             ))
 
-            with patch.object(session_prompt, "BACKGROUND_FILE", background_file):
+            with patch_path(session_prompt, 'prompt_lab/background.json', background_file):
                 first = session_prompt.compose_session_system_prompt(shared)
                 background_file.write_text(
                     json.dumps({"content": "第二版背景"}, ensure_ascii=False),
@@ -117,7 +118,7 @@ class SessionPromptTests(unittest.TestCase):
             "原始问题",
         )
 
-class AnswerHighlightPromptTests(unittest.TestCase):
+class AnswerHighlightPromptTests(WorkspaceTestCase):
     def test_opt_in_preserves_original_rules_and_background(self):
         config = SessionConfig(system_prompt='原规则', background_mode='custom', background_context='背景')
         session = make_session(config)
