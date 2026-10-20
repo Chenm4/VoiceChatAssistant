@@ -49,7 +49,6 @@ class UserIsolationTests(unittest.TestCase):
         self.shuai = TestClient(self.app)
         self.addCleanup(self.bo.close)
         self.addCleanup(self.shuai.close)
-        auth._sessions.clear()
         auth._attempts.clear()
         self.login(self.bo, 'chenbo')
         self.login(self.shuai, 'chenshuai')
@@ -57,6 +56,7 @@ class UserIsolationTests(unittest.TestCase):
     def login(self, client, username):
         response = client.post('/api/auth/login', json={'username': username, 'password': username})
         self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn('Max-Age=7776000', response.headers['set-cookie'])
         self.assertIn('HttpOnly', response.headers['set-cookie'])
         self.assertIn('SameSite=strict', response.headers['set-cookie'])
 

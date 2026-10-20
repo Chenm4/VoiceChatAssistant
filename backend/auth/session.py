@@ -13,10 +13,10 @@ from pydantic import BaseModel, Field
 from starlette.requests import HTTPConnection
 from starlette.responses import JSONResponse
 from backend.services.user_workspace import _current, get_workspace, workspace
+from backend.auth.session_store import load_session, save_session, revoke_session
 
 COOKIE = 'voice_session'
-TTL = 7 * 24 * 3600
-_sessions = {}
+TTL = 90 * 24 * 3600
 _attempts = {}
 router = APIRouter(prefix='/auth', tags=['登录'])
 
@@ -36,7 +36,7 @@ def token_from(scope):
 
 
 def authenticated_user(scope):
-    record = _sessions.get(token_from(scope))
+    record = load_session(token_from(scope))
     if not record or record['expires'] <= time.time():
         return None
     return record['username']
@@ -73,9 +73,9 @@ async def login(body: Login, request: Request, response: Response):
             await stop_recording()
         finally:
             _current.reset(context)
-    _sessions.pop(token_from(request.scope), None)
+    revoke_session(token_from(request.scope))
     token = secrets.token_urlsafe(32)
-    _sessions[token] = {'username': body.username, 'expires': now + TTL}
+    save_session(token, body.username, now + TTL)
     response.set_cookie(COOKIE, token, httponly=True, samesite='strict', secure=request.url.scheme == 'https' or urlparse(request.headers.get('origin', '')).scheme == 'https', max_age=TTL)
     return {'username': body.username}
 
@@ -87,7 +87,7 @@ async def me():
 
 @router.post('/logout')
 async def logout(request: Request, response: Response):
-    _sessions.pop(token_from(request.scope), None)
+    revoke_session(token_from(request.scope))
     await stop_recording()
     response.delete_cookie(COOKIE)
     return {'success': True}

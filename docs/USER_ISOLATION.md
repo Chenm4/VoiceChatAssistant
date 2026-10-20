@@ -37,7 +37,7 @@ data/users/
 
 模型配置仍通过原有设置界面修改，保存到当前用户的 `settings.json`，不再改写源码或公共环境变量。原先没有界面的配置（例如 `SONIOX_CONFIG`、`VOLCENGINE_CONFIG`、`DOUBAO_REALTIME`、`NOISE_REDUCTION`、`DEFAULT_SESSION_CONFIG`）在各自的 `settings.json` 编辑后重启服务生效。`DOUBAO_REALTIME` 的字段为 `app_id` 和 `access_token`。
 
-使用原来的 `./start.sh` 启动。此简单实现采用单个后端进程，登录会话存在内存中，最长七天；重启后需要重新登录。不要配置多个 Uvicorn worker。退出或切换账户会清理当前账户的录音；切换时完整刷新页面并通知其他标签页清理旧状态。同一个浏览器 Cookie 环境使用一个登录账户，要同时使用两个账户请用不同浏览器或独立浏览器配置。
+使用原来的 `./start.sh` 启动。此简单实现采用单个后端进程，登录有效期默认 90 天（约 3 个月），登录凭证摘要保存在 `data/users/.login_sessions/`，服务重启后仍有效；主动退出、密码变更或到期后失效。旧版内存登录无法迁移，首次升级需要重新登录一次。不要配置多个 Uvicorn worker。退出或切换账户会清理当前账户的录音；切换时完整刷新页面并通知其他标签页清理旧状态。同一个浏览器 Cookie 环境使用一个登录账户，要同时使用两个账户请用不同浏览器或独立浏览器配置。
 
 前端浏览器偏好仍保存在该浏览器，已按用户分区；其余用户可变数据保存在上述目录。监听端口、HTTPS 证书、应用代码、依赖和 tokenizer 缓存属于服务设施，不是用户配置。
 
@@ -59,4 +59,4 @@ cd frontend && npm run build
 python scripts/sync_user_settings.py --source /secure/settings.json --users-root data/users --backup-root /secure/settings-backups
 ```
 
-源文件使用已配置账号的 `settings.json`，通过 SSH 等私密渠道传输，不提交 Git。脚本先备份所有账号的原配置，再同步完整服务设置，重建当前模型的 `api_config`，不修改密码、会话、提示词及个人背景。同步后重启后端，使内存缓存重新加载；用户需要重新登录。没有私人提示词模板时，新会话也会使用已配置的默认模型。此操作仅影响当前已有账号，不改变新账号的空配置策略。
+源文件使用已配置账号的 `settings.json`，通过 SSH 等私密渠道传输，不提交 Git。脚本先备份所有账号的原配置，再同步完整服务设置，重建当前模型的 `api_config`，不修改密码、会话、提示词及个人背景。同步后重启后端，使配置缓存重新加载；有效期内的登录状态会保留。没有私人提示词模板时，新会话也会使用已配置的默认模型。此操作仅影响当前已有账号，不改变新账号的空配置策略。
