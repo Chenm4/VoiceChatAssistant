@@ -36,11 +36,13 @@ def messages_digest(messages):
     return hashlib.sha256(json.dumps(messages, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
-def save_request_snapshot(session_id, question_id, source, params):
+def save_request_snapshot(session_id, question_id, source, params, reconstruction=None):
     # Only SDK request arguments, never provider credentials. Keep image data intact.
     parameters = copy.deepcopy(params)
     record = {'id': uuid.uuid4().hex, 'created_at': time.time(), 'source': source.name,
               'parameters': parameters, 'messages_sha256': messages_digest(parameters['messages'])}
+    if reconstruction is not None:
+        record['reconstruction'] = reconstruction
     write_json(directory(session_id, question_id) / (record['id'] + '.json'), record)
     return record
 

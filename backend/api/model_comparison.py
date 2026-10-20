@@ -32,7 +32,7 @@ async def list_comparisons(session_id: str, message_id: str):
         params = record['parameters']
         snapshots.append({'id': record['id'], 'created_at': record['created_at'], 'source': record['source'],
                           'model': params['model'], 'message_count': len(params['messages']),
-                          'messages_sha256': record['messages_sha256']})
+                          'messages_sha256': record['messages_sha256'], 'reconstruction': record.get('reconstruction')})
     results = [json.loads(p.read_text()) for p in results_dir(session_id, question).glob('*.json')]
     for result in results:
         if result['status'] == 'pending' and result['id'] not in workspace().tasks:
@@ -40,6 +40,13 @@ async def list_comparisons(session_id: str, message_id: str):
             write_json(results_dir(session_id, question) / (result['id'] + '.json'), result)
     return {'snapshots': sorted(snapshots, key=lambda x: x['created_at'], reverse=True),
             'results': sorted(results, key=lambda x: x['created_at'], reverse=True)}
+
+
+@router.post('/{session_id}/messages/{message_id}/comparisons/reconstruct')
+async def reconstruct_comparison(session_id: str, message_id: str):
+    from backend.services.legacy_comparison import reconstruct_request
+    record = reconstruct_request(session_id, message_id)
+    return {'id': record['id']}
 
 
 @router.get('/{session_id}/messages/{message_id}/comparisons/snapshots/{snapshot_id}')
@@ -79,6 +86,7 @@ async def create_comparison(session_id: str, message_id: str, body: CompareReque
     params.update(model=body.target.model, stream=False,
                   **get_chat_completion_extra_params(source, body.target.model, body.target.reasoning_effort))
     record = {'id': uuid.uuid4().hex, 'snapshot_id': snapshot['id'], 'created_at': time.time(),
+              'reconstruction': snapshot.get('reconstruction'),
               'target': body.target.model_dump(), 'status': 'pending', 'content': '',
               'messages_sha256': messages_digest(params['messages']),
               'parameters': {k: v for k, v in params.items() if k != 'messages'}}

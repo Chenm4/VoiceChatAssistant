@@ -1,13 +1,17 @@
 <template>
   <el-dialog :model-value="true" title="换模型对比" width="min(900px, 94vw)" top="5vh" class="model-comparison-dialog" append-to-body @close="$emit('close')">
     <div class="comparison" @keydown.stop>
-      <p>复用当时实际发送的提示词、历史和图片；只更换目标模型与推理档位。结果单独保存，不影响原回答及后续历史。</p>
+      <p>优先使用原始请求快照；旧消息可近似重建，只包含该问题之前的历史和该问题本身。对比结果单独保存。</p>
       <p v-if="error" role="alert" class="error">{{ error }}</p>
       <p v-if="loading">正在读取请求快照…</p>
-      <el-alert v-else-if="!snapshots.length" title="这条消息没有原始请求快照，无法保证历史一致。此功能仅支持更新后实际发送或重新生成的请求；不会用当前设置猜测旧请求。" type="warning" :closable="false" />
+      <template v-else-if="!snapshots.length">
+        <el-alert title="旧消息没有原始快照，可根据保存的场景、系统提示词和此前消息近似重建。不会包含此问题之后的消息；已修改的旧配置无法保证完全还原。" type="info" :closable="false" />
+        <el-button :loading="reconstructing" @click="reconstruct">重建此前上下文</el-button>
+      </template>
       <template v-if="snapshots.length">
         <label>原始请求版本（并行模型可能有不同的历史截断）</label>
-        <select aria-label="原始请求版本" v-model="snapshotId" @change="preview = null"><option v-for="s in snapshots" :key="s.id" :value="s.id">{{ stamp(s.created_at) }} · {{ s.source }} / {{ s.model }} · {{ s.message_count }} 条消息</option></select>
+        <select aria-label="原始请求版本" v-model="snapshotId" @change="preview = null"><option v-for="s in snapshots" :key="s.id" :value="s.id">{{ s.reconstruction ? '近似重建' : '原始快照' }} · {{ stamp(s.created_at) }} · {{ s.source }} / {{ s.model }} · {{ s.message_count }} 条消息</option></select>
+        <el-alert v-if="selectedSnapshot?.reconstruction" :title="selectedSnapshot.reconstruction.notes.join(' ' )" type="warning" :closable="false" />
         <button class="link" @click="showPreview">{{ preview ? '收起原始请求' : '查看原始提示词与历史' }}</button>
         <pre v-if="preview" class="request-preview">{{ preview }}</pre>
         <label>目标模型</label>
@@ -25,7 +29,7 @@
       <article v-for="result in results" :key="result.id">
         <strong>{{ result.target.source_name }} / {{ result.target.model }}</strong>
         <small>{{ stamp(result.created_at) }} · {{ result.target.reasoning_effort }} · {{ statusLabel(result.status) }}<span v-if="result.latency_ms"> · {{ (result.latency_ms / 1000).toFixed(1) }} 秒</span></small>
-        <small>原始快照 {{ result.snapshot_id.slice(0, 8) }} · 历史校验 {{ result.messages_sha256.slice(0, 12) }}</small>
+        <small>{{ result.reconstruction ? '近似重建' : '原始快照' }} {{ result.snapshot_id.slice(0, 8) }} · 历史校验 {{ result.messages_sha256.slice(0, 12) }}</small>
         <p v-if="result.error" class="error">{{ result.error }}</p>
         <details v-if="result.reasoning_content"><summary>推理内容</summary><pre>{{ result.reasoning_content }}</pre></details>
         <div class="answer" v-html="renderMarkdown(result.content || '')"></div>
@@ -43,6 +47,8 @@ const props = defineProps({ sessionId: String, messageId: String, sources: Array
 defineEmits(['close'])
 const snapshots = ref([]), results = ref([]), snapshotId = ref(''), targetKey = ref(''), pinned = ref(''), effort = ref('none')
 const error = ref(''), preview = ref(null), loading = ref(true), submitting = ref(false)
+const reconstructing = ref(false)
+const selectedSnapshot = computed(() => snapshots.value.find(s => s.id === snapshotId.value))
 let timer, disposed = false
 const endpoint = `/sessions/${encodeURIComponent(props.sessionId)}/messages/${encodeURIComponent(props.messageId)}/comparisons`
 try { pinned.value = userStorage.getItem('comparisonPinnedModel') || ''; targetKey.value = pinned.value } catch {}
@@ -63,6 +69,16 @@ async function refresh() {
     loading.value = false
     if (!disposed && results.value.some(r => r.status === 'pending')) timer = setTimeout(refresh, 2000)
   }
+}
+async function reconstruct() {
+  reconstructing.value = true
+  try {
+    const result = await api.post(`${endpoint}/reconstruct`)
+    snapshotId.value = result.id
+    await refresh()
+    await showPreview()
+  } catch (e) { error.value = e.response?.data?.detail || '重建失败，请重试' }
+  finally { reconstructing.value = false }
 }
 async function showPreview() {
   if (preview.value) { preview.value = null; return }

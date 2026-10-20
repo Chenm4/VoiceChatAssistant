@@ -67,3 +67,33 @@ class ComparisonTests(WorkspaceAsyncTestCase):
         saved = await list_comparisons(self.session.id, 'question')
         self.assertEqual(saved['results'][0]['status'], 'error')
         self.assertNotIn('secret-provider-token', json.dumps(saved))
+
+    async def test_legacy_rebuild_excludes_all_later_turns_and_restores_scene(self):
+        from backend.api.models import SessionConfig, PromptScene
+        from backend.services.legacy_comparison import reconstruct_request
+        from backend.services.user_workspace import write_json
+        self.session.session_config = SessionConfig(system_prompt='saved system',
+            active_scene=PromptScene(id='later_scene', name='later scene', rules='DO_NOT_INCLUDE_LATER_SCENE'))
+        self.session.messages = [
+            ChatMessage(id='prior', role='user', content='earlier question', created_at=100),
+            ChatMessage(id='question', role='user', content='selected question', created_at=100),
+            ChatMessage(id='answer', parent_id='question', role='assistant', content='old answer', scene_name='old scene', created_at=100),
+            ChatMessage(id='future', role='user', content='DO_NOT_INCLUDE_FUTURE', created_at=100),
+            ChatMessage(id='future_answer', parent_id='future', role='assistant', content='DO_NOT_INCLUDE_FUTURE_ANSWER', created_at=100)]
+        user_state().session_storage.save_session(self.session)
+        write_json(self.test_workspace.path('prompt_scenes.json'), {'scenes':[
+            {'id':'old', 'name':'old scene', 'rules':'saved old scene rules'}]})
+        record = reconstruct_request(self.session.id, 'answer')
+        text = json.dumps(record['parameters']['messages'])
+        self.assertIn('earlier question', text)
+        self.assertIn('selected question', text)
+        self.assertIn('saved old scene rules', text)
+        self.assertIn('saved system', text)
+        self.assertNotIn('DO_NOT_INCLUDE', text)
+        self.assertNotIn('old answer', text)
+        self.assertEqual(record['reconstruction']['mode'], 'approximate')
+        self.assertEqual(record['reconstruction']['history_candidate_ids'], ['prior'])
+        self.assertEqual(user_state().session_storage.load_session(self.session.id).session_config.active_scene.name, 'later scene')
+        self.session.messages[0].content = 'changed later'
+        user_state().session_storage.save_session(self.session)
+        self.assertEqual(load_snapshot(self.session.id, 'question', record['id'])['parameters']['messages'], record['parameters']['messages'])
