@@ -95,3 +95,15 @@ test('both model codes automatically share a page, including ordinary code fence
   assert.equal(pending.models[1].code, null)
   assert.equal(pending.key, page.key)
 })
+
+
+test('accept direct answer_highlight arrays from saved provider responses', async () => {
+  const { answerHighlightPages } = await import('../src/utils/answerHighlight.js')
+  const answers = [{ question: '', type: 'choice', answer: 'A' }]
+  const content = '正确选项是 A。\n```json\n' + JSON.stringify({ answer_highlight: answers }) + '\n```'
+  assert.deepEqual(parseAnswerHighlight(content), answers)
+  const pages = answerHighlightPages([{ id: 'saved', role: 'assistant', content }])
+  assert.equal(pages[0].models[0].answers[0].answer, 'A')
+  assert.deepEqual(parseAnswerHighlight(content + '\n后续分析'), [])
+  assert.deepEqual(parseAnswerHighlight('```json\n' + JSON.stringify({ answer_highlight: [{question: '', type: 'choice', answer: '<script>'}] }) + '\n```'), [])
+})

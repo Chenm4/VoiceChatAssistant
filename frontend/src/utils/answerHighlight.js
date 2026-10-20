@@ -8,7 +8,10 @@ export function parseAnswerHighlight(content) {
   if (!match) return []
   try {
     const payload = JSON.parse(match[1])
-    const answers = payload?.answer_highlight?.answers
+    // Providers sometimes omit the `answers` wrapper. Both forms carry the
+    // same protocol; retain all item validation and final-block requirements.
+    const highlight = payload?.answer_highlight
+    const answers = Array.isArray(highlight) ? highlight : highlight?.answers
     if (!Array.isArray(answers) || answers.length > 100) return []
     if (!answers.every(item => item && typeof item.question === 'string' && item.question.length <= 40
       && ((item.type === 'choice' && typeof item.answer === 'string' && /^[A-Z]{1,26}$/.test(item.answer)
