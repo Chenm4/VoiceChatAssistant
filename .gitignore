@@ -27,6 +27,7 @@ wheels/
 # 前端
 node_modules/
 frontend/dist/
+frontend/dist-cloud/
 frontend/.vite/
 npm-debug.log*
 yarn-debug.log*

@@ -6,10 +6,10 @@
 
 ```sh
 cd frontend
-npm run build -- --base=/voicechat/
+npm run build:cloud
 ```
 
-将构建结果发布到 `/var/www/voicechat/`。`frontend/src/utils/apiUrl.js` 使用 Vite 的 `BASE_URL` 统一生成登录、HTTP、流式请求、附件和 WebSocket 的 API 路径，避免请求落到同域的其他应用。
+将 `frontend/dist-cloud/` 的构建结果发布到 `/var/www/voicechat/`。`frontend/src/utils/apiUrl.js` 使用 Vite 的 `BASE_URL` 统一生成登录、HTTP、流式请求、附件和 WebSocket 的 API 路径，避免请求落到同域的其他应用。
 
 Nginx 的 `/etc/nginx/conf.d/serverbox-monitor.conf` 在对应的 443 server 中引入 `/etc/nginx/snippets/voicechatassistant-path.conf`：
 
@@ -20,3 +20,5 @@ Nginx 的 `/etc/nginx/conf.d/serverbox-monitor.conf` 在对应的 443 server 中
 修改配置后先执行 `nginx -t`，通过后使用 `systemctl reload nginx` 平滑加载。仅修改前端及 Nginx 时不需要重启后端。
 
 账号是 `chenbo` 和 `chenshuai`，初始密码与账号名相同。两个账号应分别验证登录、身份、会话接口及退出；未登录访问 API 应返回 401。模型密钥属于每个用户的独立配置，部署不会将一个用户的凭据复制给另一个用户。
+
+本地使用 `npm run build`，输出到 `frontend/dist/`，由后端根路径提供页面（默认 `http://localhost:8888/`）。云端构建独立输出，避免 `/voicechat/assets/` 被本地根路径服务误用。运行 `./start.sh` 时也可使用启动日志中的 5188 开发页面地址（启用证书时为 HTTPS）。
