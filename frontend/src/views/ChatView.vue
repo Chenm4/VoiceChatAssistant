@@ -2146,7 +2146,7 @@ const escapeGesture = createEscapeGesture({
 
 // 键盘事件处理
 function handleKeyDown(event) {
-  if (document.querySelector('.user-guide-dialog')) return
+  if (document.querySelector('.user-guide-dialog, .model-comparison-dialog')) return
   if (escapeGesture.handle(event)) {
     if (isRecording.value) {
       event.preventDefault()

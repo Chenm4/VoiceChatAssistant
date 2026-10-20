@@ -20,6 +20,7 @@ from prompt_lab.router import router as prompt_lab_router
 from backend.api.doubao_realtime import router as doubao_realtime_router
 from backend.api.browser_recording import router as browser_recording_router
 from backend.api.voice_settings import router as voice_settings_router
+from backend.api.model_comparison import router as model_comparison_router
 from backend.utils.logger import get_app_logger
 
 # 初始化日志
@@ -64,6 +65,7 @@ app.include_router(prompt_lab_router, prefix="/api")
 app.include_router(doubao_realtime_router, prefix="/api")
 app.include_router(browser_recording_router, prefix="/api")
 app.include_router(voice_settings_router, prefix="/api")
+app.include_router(model_comparison_router, prefix="/api")
 
 
 @app.on_event("startup")

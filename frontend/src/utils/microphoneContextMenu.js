@@ -12,7 +12,7 @@ export function installMicrophoneContextMenu(target, toggle, { getAction = () =>
     }
   }
   const onContextMenu = event => {
-    if (event.target?.closest?.('.user-guide-dialog')) return
+    if (event.target?.closest?.('.user-guide-dialog, .model-comparison-dialog')) return
     event.preventDefault()
     event.stopImmediatePropagation()
     runRightClickAction()

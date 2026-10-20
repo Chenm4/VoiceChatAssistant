@@ -6,6 +6,7 @@
       '--message-line-height': lineHeight
     }"
   >
+    <ModelComparison v-if="comparisonMessageId" :key="currentSessionId + comparisonMessageId" :session-id="currentSessionId" :message-id="comparisonMessageId" :sources="sources" @close="comparisonMessageId = null" />
     <!-- 顶部工具栏 -->
     <div v-if="messages.length > 0 && isSelectionMode" class="toolbar">
       <div class="toolbar-left">
@@ -123,6 +124,7 @@
                 
                 <!-- 悬浮操作按钮 - 右下角 -->
                 <div v-if="editingIndex !== index && !isSelectionMode" class="message-actions-outer">
+                  <button @click.stop="comparisonMessageId = msg.id" class="btn-action" title="换模型对比（原始请求）" aria-label="换模型对比"><GitCompareArrows :size="18" /></button>
                   <button @click="copyMessage(msg, $event)" class="btn-action" title="复制">
                     <AppIcon name="copy" class=" " />
                   </button>
@@ -223,7 +225,8 @@
                     
                     <!-- 操作按钮 -->
                     <div v-if="!isSelectionMode" class="message-actions-outer">
-                      <button @click="copyMessage(modelMsg, $event)" class="btn-action" title="复制">
+                      <button @click.stop="comparisonMessageId = msg.id" class="btn-action" title="换模型对比（原始请求）" aria-label="换模型对比"><GitCompareArrows :size="18" /></button>
+                  <button @click="copyMessage(modelMsg, $event)" class="btn-action" title="复制">
                         <AppIcon name="copy" class=" " />
                       </button>
                       <button 
@@ -316,6 +319,7 @@
 
                 <!-- 悬浮操作按钮 - 右下角 -->
                 <div v-if="editingIndex !== index && !isSelectionMode" class="message-actions-outer">
+                  <button @click.stop="comparisonMessageId = msg.id" class="btn-action" title="换模型对比（原始请求）" aria-label="换模型对比"><GitCompareArrows :size="18" /></button>
                   <button @click="copyMessage(msg, $event)" class="btn-action" title="复制">
                     <AppIcon name="copy" class=" " />
                   </button>
@@ -353,9 +357,10 @@
 </template>
 
 <script setup>
+import ModelComparison from './ModelComparison.vue'
 import { userStorage, authFetch, privateUrl } from '../utils/auth'
 
-import { AudioLines, MessageSquare, Mic, ScanLine } from 'lucide-vue-next'
+import { AudioLines, MessageSquare, Mic, ScanLine, GitCompareArrows } from 'lucide-vue-next'
 import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { captureReadingPosition as capturePosition, restoreReadingPosition as restorePosition } from '../utils/scrollPosition'
 import { ElMessage } from 'element-plus'
@@ -392,6 +397,8 @@ const props = defineProps({
     default: 1.7
   }
 })
+
+const comparisonMessageId = ref(null)
 
 const emit = defineEmits(['message-updated', 'message-deleted', 'messages-deleted', 'regenerate', 'capture-edit-image'])
 

@@ -47,6 +47,7 @@ from backend.api.models import (
 from backend.services.audio_recorder import AudioRecorder
 from backend.services.voice_recognizer import VoiceRecognizer
 from backend.services.streaming_asr import StreamingASR
+from backend.services.request_snapshots import save_request_snapshot
 from backend.services.chat_context import build_scoped_request
 from backend.services.token_budget import count_tokens, newest_tokens
 from backend.services.session_prompt import (
@@ -1482,6 +1483,7 @@ async def chat(request: ChatRequest):
                                 source, model_name, target['reasoning_effort']
                             )
                         )
+                        save_request_snapshot(current_session.id, user_msg_id, source, request_params)
                         request_preview = log_provider_request(source, request_params)
                         await chunk_queue.put({
                             "type": "provider_request",
@@ -1675,6 +1677,7 @@ async def chat(request: ChatRequest):
                         source_to_use, model_to_use, target['reasoning_effort']
                     )
                 )
+                save_request_snapshot(current_session.id, user_msg_id, source_to_use, request_params)
                 request_preview = log_provider_request(source_to_use, request_params)
                 yield f"data: {json.dumps({'type': 'provider_request', 'stage': 'chat', 'model_key': target['key'], 'request': request_preview}, ensure_ascii=False)}\n\n"
                 stream = await asyncio.to_thread(client.chat.completions.create, **request_params)
@@ -2911,6 +2914,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                                 source, model_name, target['reasoning_effort']
                             )
                         )
+                        save_request_snapshot(session.id, target_message.id, source, request_params)
                         request_preview = log_provider_request(source, request_params)
                         await chunk_queue.put({
                             "type": "provider_request",
@@ -3110,6 +3114,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                         source_to_use, model_to_use, target['reasoning_effort']
                     )
                 )
+                save_request_snapshot(session.id, target_message.id, source_to_use, request_params)
                 request_preview = log_provider_request(source_to_use, request_params)
                 yield f"data: {json.dumps({'type': 'provider_request', 'stage': 'regenerate', 'model_key': target['key'], 'request': request_preview}, ensure_ascii=False)}\n\n"
                 if targeted_rerun:
