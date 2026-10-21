@@ -10,8 +10,8 @@ from backend.api.models import ChatMessage, ChatRequest, RegenerateMessageReques
 
 class StopParallelGenerationTests(WorkspaceAsyncTestCase):
     async def test_disconnect_closes_every_model_stream_for_chat_and_regenerate(self):
-        for regenerate in (False, True):
-            with self.subTest(regenerate=regenerate):
+        for regenerate, mode in ((r, m) for r in (False, True) for m in ("partial", "left_done", "complete")):
+            with self.subTest(regenerate=regenerate, mode=mode):
                 question = ChatMessage(id='question', role='user', content='question')
                 session = Session(id='stop-test', title='test', created_at=1, updated_at=1,
                                   messages=[question], session_config=SessionConfig())
@@ -24,6 +24,7 @@ class StopParallelGenerationTests(WorkspaceAsyncTestCase):
                     def __init__(self):
                         self.closed = False
                         self.first = True
+                        self.index = len(streams)
                         streams.append(self)
 
                     def __aiter__(self):
@@ -33,6 +34,8 @@ class StopParallelGenerationTests(WorkspaceAsyncTestCase):
                         if self.first:
                             self.first = False
                             return SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content='partial'))])
+                        if mode == "complete" or (mode == "left_done" and self.index == 0):
+                            raise StopAsyncIteration
                         await asyncio.Event().wait()
 
                     async def close(self):
@@ -64,9 +67,18 @@ class StopParallelGenerationTests(WorkspaceAsyncTestCase):
                     iterator = response.body_iterator
                     while True:
                         part = await asyncio.wait_for(iterator.__anext__(), 1)
-                        if '"type": "content"' in part:
+                        event = __import__('json').loads(part.removeprefix('data: ').strip())
+                        stop_event = {"partial": "content", "left_done": "model_done", "complete": "done"}[mode]
+                        if event["type"] == stop_event:
+                            if mode == "left_done":
+                                answers_now = [item for item in session.messages if item.role == 'assistant']
+                                self.assertEqual(answers_now[0].parallel_models[0]['content'], 'partial')
                             break
                     await asyncio.wait_for(iterator.aclose(), 1)
+                answers = [item for item in session.messages if item.role == 'assistant']
+                self.assertEqual(len(answers), 1)
+                self.assertEqual([item['content'] for item in answers[0].parallel_models], ['partial', 'partial'])
+                self.assertEqual(len(set(item.id for item in session.messages)), len(session.messages))
                 self.assertEqual(len(streams), 2)
                 self.assertTrue(all(stream.closed for stream in streams))
                 self.assertTrue(all(client.closed for client in clients))

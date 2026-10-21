@@ -595,6 +595,7 @@ async function handleSendMessage(options = {}) {
   if (!message) return
   if (!messageOverride) inputMessage.value = ''
   
+  const requestSessionId = currentSessionId.value
   // 添加用户消息
   const requestId = `text-${Date.now()}-${Math.random().toString(36).slice(2)}`
   messages.value.push({
@@ -608,6 +609,7 @@ async function handleSendMessage(options = {}) {
   // 先添加一个空的 assistant 消息（单模型情况下使用）
   messages.value.push({
     role: 'assistant',
+    local_request_id: requestId,
     content: '',
     time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     is_typing_dots: true // 显示打字机动画
@@ -637,7 +639,7 @@ async function handleSendMessage(options = {}) {
       },
       body: JSON.stringify({
         message,
-        session_id: currentSessionId.value,
+        session_id: requestSessionId,
         attachment_ids: attachments.map(attachment => attachment.id)
       }),
       signal: sendController.signal
@@ -648,7 +650,7 @@ async function handleSendMessage(options = {}) {
     }
     
     if (showDoubao.value && !options.skipDoubao && attachments.length === 0) {
-      doubaoOverlay.value?.submit({ session_id: currentSessionId.value, text: message })
+      doubaoOverlay.value?.submit({ session_id: requestSessionId, text: message })
     }
     bindStreamingQuestion(messages.value, requestId, response)
     console.log('✅ 连接成功，开始接收流式数据...')
@@ -679,7 +681,7 @@ async function handleSendMessage(options = {}) {
     if (refreshPromise) await refreshPromise
     
     function processLine(line) {
-      if (sendController.signal.aborted) return
+      if (sendController.signal.aborted || currentSessionId.value !== requestSessionId) return
       const trimmedLine = line.trim()
       if (!trimmedLine || !trimmedLine.startsWith('data: ')) return
       
@@ -695,7 +697,7 @@ async function handleSendMessage(options = {}) {
           
           // 移除之前添加的单个空消息
           for (let i = messages.value.length - 1; i >= 0; i--) {
-            if (messages.value[i].role === 'assistant' && messages.value[i].content === '') {
+            if (messages.value[i].role === 'assistant' && messages.value[i].local_request_id === requestId) {
               messages.value.splice(i, 1)
               break
             }
@@ -705,6 +707,7 @@ async function handleSendMessage(options = {}) {
           const multiModelMsg = {
             role: 'assistant',
             is_multi_model: true,
+            local_request_id: requestId,
             models: [],
             time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
             is_typing_dots: true // 显示打字机动画
@@ -744,7 +747,7 @@ async function handleSendMessage(options = {}) {
             // 多模型模式：更新对应索引的消息
             if (modelMessages[data.model_index]) {
               // 直接更新 messages.value 中的多模型消息，触发 Vue 响应式更新
-              const multiModelMsg = messages.value[messages.value.length - 1]
+              const multiModelMsg = messages.value.find(m => m.role === 'assistant' && m.local_request_id === requestId)
               if (multiModelMsg && multiModelMsg.is_multi_model && multiModelMsg.models[data.model_index]) {
                 appendAnswerDelta(multiModelMsg.models[data.model_index], data)
               }
@@ -752,7 +755,7 @@ async function handleSendMessage(options = {}) {
           } else {
             // 单模型模式：找到最后一条 assistant 消息
             for (let i = messages.value.length - 1; i >= 0; i--) {
-              if (messages.value[i].role === 'assistant') {
+              if (messages.value[i].role === 'assistant' && messages.value[i].local_request_id === requestId) {
                 appendAnswerDelta(messages.value[i], data)
                 break
               }
@@ -777,7 +780,7 @@ async function handleSendMessage(options = {}) {
           modelMessages = []  // 清空多模型缓存
           // 重新加载消息以获取完整的带ID的数据
           if (currentSessionId.value) {
-            refreshPromise = loadSessionMessages(currentSessionId.value).then(() => {
+            refreshPromise = loadSessionMessages(requestSessionId).then(() => {
               return loadSessions()
             }).catch(err => {
               console.error('重新加载消息失败:', err)
@@ -812,7 +815,7 @@ async function handleSendMessage(options = {}) {
       } else {
         // 单模型：检查最后一条 assistant 消息是否有内容
         for (let i = messages.value.length - 1; i >= 0; i--) {
-          if (messages.value[i].role === 'assistant') {
+          if (messages.value[i].role === 'assistant' && messages.value[i].local_request_id === requestId) {
             if (!messages.value[i].content || !messages.value[i].content.trim()) {
               // 没有内容，移除
               messages.value.splice(i, 1)
@@ -825,29 +828,15 @@ async function handleSendMessage(options = {}) {
         }
       }
     } else {
-      // 真正的错误，移除所有临时消息
       console.error('发送消息失败:', error)
       showNotification('发送失败: ' + error.message, 'error')
-      
-      // 移除临时添加的 assistant 消息
-      if (modelMessages.length > 0) {
-        // 多模型：移除所有模型的消息
-        modelMessages.forEach(() => {
-          for (let i = messages.value.length - 1; i >= 0; i--) {
-            if (messages.value[i].role === 'assistant') {
-              messages.value.splice(i, 1)
-              break
-            }
-          }
-        })
-      } else {
-        // 单模型：移除最后一条 assistant 消息
-        for (let i = messages.value.length - 1; i >= 0; i--) {
-          if (messages.value[i].role === 'assistant') {
-            messages.value.splice(i, 1)
-            break
-          }
-        }
+      // A disconnected stream must not erase an answer already visible.
+      const index = messages.value.findIndex(m => m.role === 'assistant' && m.local_request_id === requestId)
+      if (index >= 0) {
+        const answer = messages.value[index]
+        const entries = answer.models || answer.parallel_models || [answer]
+        if (!entries.some(m => m.content || m.reasoning_content)) messages.value.splice(index, 1)
+        else answer.is_typing_dots = false
       }
     }
   } finally {

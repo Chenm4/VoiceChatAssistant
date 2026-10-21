@@ -1300,7 +1300,13 @@ async def chat(request: ChatRequest):
             if message.id == user_msg_id:
                 if assistant_msg.id not in message.children_ids:
                     message.children_ids.append(assistant_msg.id)
-                latest_session.messages.insert(index + 1, assistant_msg)
+                existing_index = next((i for i, item in enumerate(latest_session.messages)
+                                       if item.id == assistant_msg.id), None)
+                if existing_index is None:
+                    latest_session.messages.insert(index + 1, assistant_msg)
+                else:
+                    assistant_msg.children_ids = latest_session.messages[existing_index].children_ids
+                    latest_session.messages[existing_index] = assistant_msg
                 latest_session.updated_at = int(time.time())
                 if not user_state().session_storage.save_session(latest_session):
                     raise RuntimeError("保存回答失败")
@@ -1407,6 +1413,44 @@ async def chat(request: ChatRequest):
     async def generate():
         tasks = []
         import asyncio
+        assistant_msg_id = f"msg_{uuid.uuid4().hex[:12]}"
+        assistant_msg_time = int(time.time())
+        model_results = {}
+        assistant_message = ''
+        assistant_reasoning = ''
+        saved_complete = False
+        last_checkpoint = 0.0
+
+        def checkpoint(force=False):
+            nonlocal last_checkpoint
+            if user_state().generation_epochs.get(current_session.id) != chat_epoch:
+                return
+            if not force and time.monotonic() - last_checkpoint < 1:
+                return
+            entries = [{
+                "model": result["model"], "model_key": result["model_key"],
+                "source_name": result["source_name"], "content": result["content"],
+                "reasoning_content": result["reasoning_content"],
+                "model_info": {"id": result["model_key"], "name": result["model"],
+                               "provider": result["source_name"],
+                               "reasoning_effort": result["reasoning_effort"]},
+            } for result in model_results.values()]
+            if not (any(item["content"] or item["reasoning_content"] for item in entries)
+                    or assistant_message or assistant_reasoning):
+                return
+            target = model_targets[0]
+            save_chat_answer(ChatMessage(
+                id=assistant_msg_id, parent_id=user_msg_id, role="assistant",
+                created_at=assistant_msg_time,
+                scene_name=session_config.active_scene.name if session_config and session_config.active_scene else None,
+                content=assistant_message, reasoning_content=assistant_reasoning,
+                type="multi_model" if entries else "text",
+                is_parallel_response=bool(entries), parallel_models=entries or None,
+                model_info=None if entries else {
+                    "id": target["key"], "name": target["model"],
+                    "provider": target["source_name"], "reasoning_effort": target["reasoning_effort"]},
+            ))
+            last_checkpoint = time.monotonic()
         try:
             logger.info(f"📝 会话总消息数: {len(current_session.messages)}")
             is_parallel = len(models_to_use) > 1
@@ -1558,6 +1602,7 @@ async def chat(request: ChatRequest):
                         # 等待队列中的下一个 chunk（超时 60 秒）
                         chunk_data = await asyncio.wait_for(chunk_queue.get(), timeout=60.0)
                         
+                        checkpoint(force=chunk_data["type"] in ("model_done", "model_error"))
                         # 发送到客户端
                         yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
                         await asyncio.sleep(0)
@@ -1589,8 +1634,6 @@ async def chat(request: ChatRequest):
                 logger.info(f"🎉 所有模型并行完成，共 {len(assistant_messages)} 个")
                 
                 # 保存多模型响应 - 使用一个容器消息
-                assistant_msg_id = f"msg_{uuid.uuid4().hex[:12]}"
-                assistant_msg_time = int(time.time())
                 
                 # 构建并行模型数据列表
                 parallel_models_data = []
@@ -1625,6 +1668,7 @@ async def chat(request: ChatRequest):
                 )
                 
                 save_chat_answer(assistant_msg)
+                saved_complete = True
                 
                 # 记录每个模型的交互
                 for idx, model_data in enumerate(parallel_models_data):
@@ -1693,10 +1737,12 @@ async def chat(request: ChatRequest):
                     reasoning = provider_reasoning_text(chunk.choices[0].delta)
                     if reasoning:
                         assistant_reasoning += reasoning
+                        checkpoint()
                         yield f"data: {json.dumps({'type': 'reasoning', 'data': reasoning}, ensure_ascii=False)}\n\n"
                     content = chunk.choices[0].delta.content
                     if content:
                         assistant_message += content
+                        checkpoint()
                         chunk_count += 1
                         
                         # 立即发送这个 chunk
@@ -1727,8 +1773,6 @@ async def chat(request: ChatRequest):
                 )
                 
                 # 生成 assistant 消息 ID
-                assistant_msg_id = f"msg_{uuid.uuid4().hex[:12]}"
-                assistant_msg_time = int(time.time())
                 
                 # 创建 assistant 消息（包含完整元数据）
                 assistant_msg = ChatMessage(
@@ -1758,6 +1802,7 @@ async def chat(request: ChatRequest):
                 
                 # 更新用户消息的 children_ids
                 save_chat_answer(assistant_msg)
+                saved_complete = True
                 
                 logger.info(f"💾 AI 回复完成并保存，总长度: {len(assistant_message)}, session={current_session.id}")
                 
@@ -1779,6 +1824,13 @@ async def chat(request: ChatRequest):
                     )
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
         finally:
+            # Synchronous checkpoint also runs on disconnect before cancellation
+            # reaches any awaited cleanup.
+            if not saved_complete:
+                try:
+                    checkpoint(force=True)
+                except Exception:
+                    logger.exception("保存中断回答失败")
             for task in tasks:
                 if not task.done():
                     task.cancel()
@@ -2843,6 +2895,53 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
         import asyncio
         import uuid
         
+        assistant_msg_id = f"msg_{uuid.uuid4().hex[:12]}"
+        assistant_msg_time = int(time.time())
+        model_results = {}
+        assistant_message = ''
+        assistant_reasoning = ''
+        saved_complete = False
+        last_checkpoint = 0.0
+
+        def checkpoint(force=False):
+            nonlocal last_checkpoint
+            if targeted_rerun or user_state().generation_epochs.get(session_id) != generation_epoch:
+                return
+            if not force and time.monotonic() - last_checkpoint < 1:
+                return
+            entries = [{
+                "model": result["model"], "model_key": result["model_key"],
+                "source_name": result["source_name"], "content": result["content"],
+                "reasoning_content": result["reasoning_content"],
+                "model_info": {"id": result["model_key"], "name": result["model"],
+                               "provider": result["source_name"],
+                               "reasoning_effort": result["reasoning_effort"]},
+            } for result in model_results.values()]
+            if not (any(item["content"] or item["reasoning_content"] for item in entries)
+                    or assistant_message or assistant_reasoning):
+                return
+            target = model_targets[0]
+            partial_answer = ChatMessage(
+                id=assistant_msg_id, parent_id=message_id, role="assistant",
+                created_at=assistant_msg_time,
+                scene_name=session_config.active_scene.name if session_config and session_config.active_scene else None,
+                content=assistant_message, reasoning_content=assistant_reasoning,
+                type="multi_model" if entries else "text",
+                is_parallel_response=bool(entries), parallel_models=entries or None,
+                model_info=None if entries else {
+                    "id": target["key"], "name": target["model"],
+                    "provider": target["source_name"], "reasoning_effort": target["reasoning_effort"]},
+            )
+            partial_answer.children_ids = list(grandchildren_ids)
+            session.messages = [item for item in session.messages if item.id != assistant_msg_id]
+            session.messages.insert(target_index_after_delete + 1, partial_answer)
+            if assistant_msg_id not in target_message.children_ids:
+                target_message.children_ids.append(assistant_msg_id)
+            for item in session.messages:
+                if item.id in grandchildren_ids:
+                    item.parent_id = assistant_msg_id
+            save_current_generation()
+            last_checkpoint = time.monotonic()
         try:
             is_parallel = len(models_to_use) > 1
             logger.info(f"开始重新生成: models={models_to_use}, parallel={is_parallel}")
@@ -2983,6 +3082,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                 while completed_models < len(models_to_use):
                     try:
                         chunk_data = await asyncio.wait_for(chunk_queue.get(), timeout=60.0)
+                        checkpoint(force=chunk_data["type"] in ("model_done", "model_error"))
                         yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
                         await asyncio.sleep(0)
                         
@@ -3008,8 +3108,6 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                         })
                 
                 # 保存多模型响应
-                assistant_msg_id = f"msg_{uuid.uuid4().hex[:12]}"
-                assistant_msg_time = int(time.time())
                 
                 parallel_models_data = []
                 for model_data in assistant_messages:
@@ -3041,7 +3139,8 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                     parallel_models=parallel_models_data
                 )
                 
-                target_message.children_ids.append(assistant_msg_id)
+                if assistant_msg_id not in target_message.children_ids:
+                    target_message.children_ids.append(assistant_msg_id)
                 
                 # 将后续对话（孙子消息）链接到新的回答
                 if grandchildren_ids:
@@ -3056,11 +3155,13 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                 
                 # 在目标消息后面插入新消息（而不是 append 到末尾）
                 insert_position = target_index_after_delete + 1
+                session.messages = [item for item in session.messages if item.id != assistant_msg_id]
                 session.messages.insert(insert_position, assistant_msg)
                 logger.info(f"新消息插入到位置 {insert_position}")
                 
                 session.updated_at = int(time.time())
                 save_current_generation()
+                saved_complete = True
                 
                 # 记录每个模型的交互
                 for model_data in parallel_models_data:
@@ -3157,6 +3258,7 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                         existing_assistant.model_info.reasoning_effort = target['reasoning_effort']
                     session.updated_at = int(time.time())
                     save_current_generation()
+                    saved_complete = True
                     yield f"data: {json.dumps({'type': 'done', 'message_id': existing_assistant.id}, ensure_ascii=False)}\n\n"
                     return
                 
@@ -3171,8 +3273,6 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                 )
                 
                 # 生成 assistant 消息
-                assistant_msg_id = f"msg_{uuid.uuid4().hex[:12]}"
-                assistant_msg_time = int(time.time())
                 
                 assistant_msg = ChatMessage(
                     id=assistant_msg_id,
@@ -3199,7 +3299,8 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                     latency_ms=latency_ms
                 )
                 
-                target_message.children_ids.append(assistant_msg_id)
+                if assistant_msg_id not in target_message.children_ids:
+                    target_message.children_ids.append(assistant_msg_id)
                 
                 # 将后续对话（孙子消息）链接到新的回答
                 if grandchildren_ids:
@@ -3214,12 +3315,14 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                 
                 # 在目标消息后面插入新消息（而不是 append 到末尾）
                 insert_position = target_index_after_delete + 1
+                session.messages = [item for item in session.messages if item.id != assistant_msg_id]
                 session.messages.insert(insert_position, assistant_msg)
                 logger.info(f"新消息插入到位置 {insert_position}")
                 
                 session.updated_at = assistant_msg_time
                 
                 save_current_generation()
+                saved_complete = True
                 
                 logger.info(f"AI 回复完成并保存，总长度: {len(assistant_message)}")
                 
@@ -3240,6 +3343,11 @@ async def regenerate_message(session_id: str, message_id: str, request: Regenera
                     )
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
         finally:
+            if not saved_complete:
+                try:
+                    checkpoint(force=True)
+                except Exception:
+                    logger.exception("保存中断重答失败")
             for task in tasks:
                 if not task.done():
                     task.cancel()

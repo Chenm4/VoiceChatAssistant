@@ -52,7 +52,7 @@
       <!-- 消息列表 -->
       <div 
         v-for="(msg, index) in messages" 
-        :key="index" 
+        :key="msg.local_request_id ? msg.role + msg.local_request_id : (msg.id || index)"
         class="message mb-6"
         :data-message-index="index"
         :data-message-id="msg.id || msg.local_request_id || ''"
@@ -1298,6 +1298,7 @@ defineExpose({
   padding: 28px 32px 48px;
   overflow-y: auto;
   overflow-x: hidden;
+  overflow-anchor: none;
   scroll-behavior: auto;
   scrollbar-gutter: stable;
   background: #f7f9fc;
