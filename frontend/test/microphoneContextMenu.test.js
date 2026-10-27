@@ -96,3 +96,36 @@ test('reading the guide keeps native right-click without recording or capturing'
   assert.equal(event.defaultPrevented, false)
   cleanup()
 })
+
+test('physical Backquote follows Enter action across layouts and respects input guards', () => {
+  const target = new EventTarget()
+  let action = 'record', recordings = 0, photos = 0
+  const cleanup = installMicrophoneContextMenu(target, () => recordings++, {
+    getAction: () => action, capturePhoto: () => photos++
+  })
+  const press = properties => {
+    const event = new Event('keydown', { cancelable: true })
+    Object.assign(event, { key: '·', code: 'Backquote', ...properties })
+    target.dispatchEvent(event)
+    return event.defaultPrevented
+  }
+  assert.equal(press({}), true)
+  assert.equal(recordings, 1)
+  action = 'photo'
+  assert.equal(press({ key: '`' }), true)
+  assert.equal(photos, 1)
+  for (const properties of [
+    { repeat: true }, { isComposing: true }, { keyCode: 229 },
+    { shiftKey: true }, { ctrlKey: true }, { altKey: true }, { metaKey: true },
+    { key: '·', code: 'KeyA' }
+  ]) assert.equal(press(properties), false)
+  for (const selector of ['input', 'textarea', 'select', '[contenteditable="true"]', '[role="dialog"]']) {
+    target.closest = selectors => selectors.includes(selector) ? {} : null
+    assert.equal(press({}), false)
+  }
+  assert.equal(photos, 1)
+  target.closest = undefined
+  cleanup()
+  assert.equal(press({}), false)
+  assert.equal(recordings, 1)
+})

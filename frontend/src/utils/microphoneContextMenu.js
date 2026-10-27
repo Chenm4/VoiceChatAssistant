@@ -17,8 +17,10 @@ export function installMicrophoneContextMenu(target, toggle, { getAction = () =>
     event.stopImmediatePropagation()
     runRightClickAction()
   }
-  const onEnter = event => {
-    if (event.key !== 'Enter' || event.repeat || event.isComposing || event.keyCode === 229 ||
+  const onActionKey = event => {
+    // Physical key below Escape: independent of Chinese/English layout.
+    const isActionKey = event.key === 'Enter' || event.code === 'Backquote'
+    if (!isActionKey || event.repeat || event.isComposing || event.keyCode === 229 ||
         event.ctrlKey || event.altKey || event.metaKey || event.shiftKey ||
         event.target?.closest?.('input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="textbox"], [role="dialog"], .el-overlay')) return
     event.preventDefault()
@@ -28,11 +30,11 @@ export function installMicrophoneContextMenu(target, toggle, { getAction = () =>
   target.addEventListener('pointerdown', blockSecondaryDown, capture)
   target.addEventListener('mousedown', blockSecondaryDown, capture)
   target.addEventListener('contextmenu', onContextMenu, capture)
-  target.addEventListener('keydown', onEnter, capture)
+  target.addEventListener('keydown', onActionKey, capture)
   return () => {
     target.removeEventListener('pointerdown', blockSecondaryDown, capture)
     target.removeEventListener('mousedown', blockSecondaryDown, capture)
     target.removeEventListener('contextmenu', onContextMenu, capture)
-    target.removeEventListener('keydown', onEnter, capture)
+    target.removeEventListener('keydown', onActionKey, capture)
   }
 }
